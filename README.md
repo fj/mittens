@@ -1,0 +1,158 @@
+# mittens
+
+Run coding agents with clean paws.
+
+Some coding agents litter the real home directory with hardcoded dotfiles
+instead of following the [XDG Base Directory
+spec](https://specifications.freedesktop.org/basedir-spec/latest/). mittens
+runs the agent inside a private mount namespace (via
+[bubblewrap](https://github.com/containers/bubblewrap)) where those paths are
+redirected to an XDG-compliant state directory, so the real home directory
+stays free of tool cruft.
+
+## How it works
+
+Inside the namespace, `$HOME` is replaced with a throwaway tmpfs, every real
+top-level entry of the home directory is bind-mounted back into place, and the
+state directory is mounted over the tool's hardcoded dot-directory. The mount
+point is created on the tmpfs, never on disk. Because the redirect happens at
+the kernel VFS layer, it applies to the tool and every subprocess it spawns
+(shell tools, MCP servers, hooks) — even for hardcoded path references — and
+does not depend on the tool honoring any environment variable, now or in
+future versions.
+
+## Services
+
+Everything tool-specific — the binary, which real-home paths to shadow,
+whether a top-level config file needs copy-sync, whether an unsandboxed
+fallback exists, and what extra mounts to wire — lives in a service handler
+(`src/service.rs`). The first argument selects the service and defaults to
+claude, so pre-service invocations keep working:
+
+    mittens [claude arguments...]             # Claude Code (default)
+    mittens claude [claude arguments...]      # Claude Code
+    mittens opencode [opencode arguments...]  # opencode
+
+### claude
+
+Claude Code hardcodes `~/.claude` and `~/.claude.json`
+([anthropics/claude-code#1455](https://github.com/anthropics/claude-code/issues/1455)).
+State directory (default: `~/.local/state/claude-home`; the name deliberately
+avoids `~/.local/state/claude`, which Claude Code's native launcher already
+uses for its own lock files):
+
+    dot-claude/    what Claude Code sees as ~/.claude
+    claude.json    what Claude Code sees as ~/.claude.json
+
+On top of that, a shared, tool-agnostic agent config (default:
+`~/.config/agents`, following the XDG config spec and the AGENTS.md
+convention) is bind-mounted into the `~/.claude` view so it is not duplicated
+in the per-tool state dir:
+
+    ~/.config/agents/agents        -> ~/.claude/agents
+    ~/.config/agents/commands      -> ~/.claude/commands
+    ~/.config/agents/skills        -> ~/.claude/skills
+    ~/.config/agents/hooks         -> ~/.claude/hooks
+    ~/.config/agents/output-styles -> ~/.claude/output-styles
+    ~/.config/agents/AGENTS.md     -> ~/.claude/CLAUDE.md   (read-only)
+
+Each is mounted only if its source exists, so mittens still runs without the
+shared config present, and a mountpoint that does not exist yet starts working
+the moment you create it under the shared config. Machine-specific state
+(settings.json, plugins, projects, sessions, credentials) stays in the
+per-tool state dir and is never shared.
+
+`~/.claude.json` is copied into the tmpfs at launch and synced back out on
+exit, rather than bind-mounted, because Claude Code appears to rewrite it via
+atomic rename — which would silently detach a file bind-mount. Consequence:
+when several mittens sessions run at once, the last one to exit wins for
+claude.json (the dot-claude directory is a shared bind mount and is not
+affected).
+
+### opencode
+
+opencode is mostly XDG-clean (`~/.config/opencode`,
+`~/.local/{share,state}/opencode`, `~/.cache/opencode`) but still drops a
+legacy `~/.opencode` into the real home (global plugin node_modules, bin/).
+mittens shadows that one path; the XDG directories are left alone. State
+directory (default: `~/.local/state/opencode-home`):
+
+    dot-opencode/  what opencode sees as ~/.opencode
+
+opencode has no `~/.claude.json` analogue, so nothing is copy-synced. The
+shared agent config is not wired in either: opencode's global config lives at
+the real, XDG-proper `~/.config/opencode`, which is visible unmodified inside
+the namespace — share pieces of `~/.config/agents` into it with plain
+symlinks, no sandbox required.
+
+## Escape hatch
+
+`mittens [service] --unsafe` skips bubblewrap and just execs the tool with an
+environment variable pointing at the state dir. Only claude supports it:
+Claude Code documents `CLAUDE_CONFIG_DIR` as relocating every `~/.claude`
+path, and it also moves the top-level config to
+`$CLAUDE_CONFIG_DIR/.claude.json` — a different location than the claude.json
+wrapped runs use, so the unsafe copy is seeded from claude.json once and
+evolves independently after that. The bind-mount wiring of the shared agent
+config is also absent in unsafe mode. Unlike the namespace, this depends
+entirely on Claude Code (and everything it spawns) honoring the environment
+variable — hence the name. opencode's `OPENCODE_CONFIG_DIR` only relocates
+config *loading*; nothing relocates `~/.opencode` itself, so opencode refuses
+`--unsafe`.
+
+## Other commands
+
+    mittens [service] --migrate
+        Move the service's existing real-home data into its state directory.
+        Run once, with no sessions of the service running.
+
+    mittens [service] --dangerously-skip-pawmissions [arguments...]
+        Inspect the service's real-home data, count down for 10 seconds, then
+        DELETE it (rm -rf) to clear the startup guard, and launch anyway.
+        Destroys data; only for disposable leftovers of unwrapped runs.
+
+## Caveats
+
+- Plain `claude`/`opencode` runs outside mittens will recreate their dotfiles
+  in the real home; mittens refuses to start while any of the service's
+  real-home paths exist, to prevent silent divergence between the two.
+  Consider aliasing `claude` to `mittens` and `opencode` to `mittens
+  opencode` in your shell (if you shadow the real opencode with a wrapper
+  named `opencode`, set `MITTENS_OPENCODE_BIN` so mittens does not resolve
+  the wrapper from PATH and recurse).
+- New top-level entries created under `$HOME` inside the namespace land on
+  the tmpfs and vanish on exit. If a tool needs a new persistent
+  `~/.something`, create it in the real home first; it will be bound in on
+  the next launch.
+- Only the current uid is mapped in the sandbox's user namespace, so files
+  owned by anyone else (root included) appear as nobody:nogroup inside it.
+  OpenSSH's config ownership check rejects the root-owned drop-ins in
+  /etc/ssh/ssh_config.d on that basis ("Bad owner or permissions") and aborts
+  every ssh invocation. mittens sets `GIT_SSH_COMMAND` to `ssh -F
+  ~/.ssh/config` (or `-F /dev/null` if you have no user config; skipped
+  entirely if `GIT_SSH_COMMAND` is already set) so git's ssh transport never
+  reads the system-wide config. Other ssh use inside the sandbox stays
+  broken; pass `-F` yourself.
+- Tools' own bwrap-based sandboxing cannot start nested inside mittens under
+  Debian's stock AppArmor policy: the stacked bwrap//&unpriv_bwrap profile
+  denies creating a nested mount namespace. Fixable with a custom AppArmor
+  profile for a private copy of bwrap.
+
+## Environment
+
+    MITTENS_STATE_DIR      override the state directory of the invoked service
+                           (per-invocation — it applies to whichever service
+                           runs, so don't export it globally if you use more
+                           than one service)
+    MITTENS_CLAUDE_BIN     override the claude executable
+                           (default: ~/.local/bin/claude)
+    MITTENS_OPENCODE_BIN   override the opencode executable
+                           (default: first opencode on PATH)
+    MITTENS_AGENTS_DIR     override the shared agent config directory
+                           (default: ${XDG_CONFIG_HOME:-~/.config}/agents;
+                           only the claude wiring uses it)
+
+## Building
+
+    cargo build --release
+    install -m755 target/release/mittens ~/.local/bin/mittens
