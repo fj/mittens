@@ -22,7 +22,7 @@ fn main() {
     let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
     // Hidden entry point re-exec'd inside the namespace; not part of the CLI.
-    if args.first().is_some_and(|a| a == "__inner") {
+    if args.first().is_some_and(|a| a == inner::SUBCOMMAND) {
         inner::run(&args[1..]);
     }
 

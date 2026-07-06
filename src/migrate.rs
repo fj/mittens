@@ -2,12 +2,11 @@
 //! directory, once, so wrapped runs pick it up from there.
 
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 
 use anyhow::{Context, Result, bail};
 
 use crate::service::Ctx;
-use crate::util::pgrep;
+use crate::util::{entries_with_prefix, pgrep};
 
 pub fn run(ctx: &Ctx) -> Result<()> {
     let svc = ctx.svc.name();
@@ -38,14 +37,8 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             rename(&home_sync, &sync_state)?;
             println!("moved ~/{sync} -> {}", sync_state.display());
         }
-        let backup_prefix = format!("{sync}.");
-        let mut backups: Vec<_> = fs::read_dir(&ctx.home)
-            .with_context(|| format!("reading {}", ctx.home.display()))?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().as_bytes().starts_with(backup_prefix.as_bytes()))
-            .map(|e| e.path())
-            .collect();
-        backups.sort();
+        let backups = entries_with_prefix(&ctx.home, &format!("{sync}."))
+            .with_context(|| format!("reading {}", ctx.home.display()))?;
         for backup in backups {
             let dest = ctx.state.join(backup.file_name().expect("backup has a file name"));
             rename(&backup, &dest)?;

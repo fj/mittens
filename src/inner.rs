@@ -2,38 +2,65 @@
 //! onto the tmpfs (rename-safe, unlike a file bind-mount), runs the tool, and
 //! syncs the file back out when the tool exits, however it exits. With no
 //! sync file the tool is exec'd directly.
+//!
+//! The argv protocol between the outer process and the re-exec is built
+//! (argv()) and parsed (run()) only in this module, so the two sides cannot
+//! drift:
+//!
+//!   __inner <state> <bin> <home sync name|""> <state sync name|""> -- <tool args...>
 
 use std::ffi::OsString;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// argv: `<state> <bin> <sync-file-name or ""> -- <tool args...>`
+use crate::service::Ctx;
+use crate::util::entries_with_prefix;
+
+pub const SUBCOMMAND: &str = "__inner";
+
+/// The argv tail the outer process appends after `bwrap ... -- <own exe>`.
+/// The state-side sync file name is resolved here from Ctx so the "leading
+/// dot dropped in the state dir" convention lives only in Ctx::sync_state.
+pub fn argv(ctx: &Ctx, bin: &Path) -> Vec<OsString> {
+    let state_name: OsString = ctx
+        .sync_state()
+        .and_then(|p| p.file_name().map(|n| n.to_os_string()))
+        .unwrap_or_default();
+    vec![
+        SUBCOMMAND.into(),
+        ctx.state.clone().into(),
+        bin.into(),
+        ctx.svc.sync_file().unwrap_or("").into(),
+        state_name,
+        "--".into(),
+    ]
+}
+
+/// Entry point; `argv` is everything after the SUBCOMMAND token.
 pub fn run(argv: &[OsString]) -> ! {
-    let usage = "mittens: __inner expects <state> <bin> <sync> -- <args...>";
-    let [state, bin, sync, sep, tool_args @ ..] = argv else {
+    let usage = "mittens: __inner expects <state> <bin> <sync-home> <sync-state> -- <args...>";
+    let [state, bin, sync_home, sync_state, sep, tool_args @ ..] = argv else {
         eprintln!("{usage}");
         std::process::exit(2);
     };
-    if sep != "--" {
+    if sep != "--" || sync_home.is_empty() != sync_state.is_empty() {
         eprintln!("{usage}");
         std::process::exit(2);
     }
     let state = PathBuf::from(state);
-    let sync = (!sync.is_empty()).then(|| sync.to_string_lossy().into_owned());
     let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is not set"));
 
-    if sync.is_none() {
+    if sync_home.is_empty() {
         let err = Command::new(bin).args(tool_args).exec();
         eprintln!("mittens: failed to exec {}: {err}", Path::new(bin).display());
         std::process::exit(127);
     }
-    let sync = sync.unwrap();
+    let sync_home = sync_home.to_string_lossy().into_owned();
 
     // <state>/claude.json -> ~/.claude.json (on the tmpfs)
-    let state_copy = state.join(&sync[1..]);
-    let home_copy = home.join(&sync);
+    let state_copy = state.join(sync_state);
+    let home_copy = home.join(&sync_home);
     if let Err(err) = std::fs::copy(&state_copy, &home_copy) {
         eprintln!("mittens: copying {} in: {err}", state_copy.display());
     }
@@ -56,7 +83,7 @@ pub fn run(argv: &[OsString]) -> ! {
     }
     let status = cmd.status();
 
-    sync_out(&state, &home, &sync);
+    sync_out(&state, &state_copy, &home, &home_copy, &sync_home);
 
     match status {
         Ok(status) => {
@@ -72,14 +99,12 @@ pub fn run(argv: &[OsString]) -> ! {
 /// Best-effort: ~/.claude.json -> <state>/claude.json, plus any
 /// ~/.claude.json.* backups the tool left next to it (kept under their own
 /// names; only the sync file itself drops the leading dot in the state dir).
-fn sync_out(state: &Path, home: &Path, sync: &str) {
-    let _ = std::fs::copy(home.join(sync), state.join(&sync[1..]));
-    let Ok(entries) = std::fs::read_dir(home) else { return };
-    let backup_prefix = format!("{sync}.");
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name.as_bytes().starts_with(backup_prefix.as_bytes()) {
-            let _ = std::fs::copy(entry.path(), state.join(&name));
+fn sync_out(state: &Path, state_copy: &Path, home: &Path, home_copy: &Path, sync_home: &str) {
+    let _ = std::fs::copy(home_copy, state_copy);
+    let Ok(backups) = entries_with_prefix(home, &format!("{sync_home}.")) else { return };
+    for backup in backups {
+        if let Some(name) = backup.file_name() {
+            let _ = std::fs::copy(&backup, state.join(name));
         }
     }
 }

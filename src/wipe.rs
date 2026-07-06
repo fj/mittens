@@ -5,14 +5,13 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
 
 use crate::service::Ctx;
-use crate::util::{human_size, pgrep};
+use crate::util::{entries_with_prefix, human_size, pause, pgrep};
 
 pub fn skip_pawmissions(ctx: &Ctx) -> Result<()> {
     let svc = ctx.svc.name();
@@ -70,14 +69,10 @@ fn targets(ctx: &Ctx) -> Result<Vec<PathBuf>> {
         targets.push(ctx.home_dot());
     }
     if let Some(sync) = ctx.svc.sync_file() {
-        let mut matches: Vec<_> = fs::read_dir(&ctx.home)
-            .with_context(|| format!("reading {}", ctx.home.display()))?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().as_bytes().starts_with(sync.as_bytes()))
-            .map(|e| e.path())
-            .collect();
-        matches.sort();
-        targets.extend(matches);
+        targets.extend(
+            entries_with_prefix(&ctx.home, sync)
+                .with_context(|| format!("reading {}", ctx.home.display()))?,
+        );
     }
     Ok(targets)
 }
@@ -132,7 +127,7 @@ fn countdown() {
             TOTAL - i
         );
         let _ = std::io::stderr().flush();
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        pause(1);
     }
     eprintln!("\r  \x1b[1;31m[{}]\x1b[0m  deleting now      ", "#".repeat(WIDTH));
 }

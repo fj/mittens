@@ -1,4 +1,6 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,9 +21,38 @@ pub fn which(name: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathB
         .find(|candidate| is_executable(candidate))
 }
 
+/// True if the file name begins with `prefix`, byte-wise — the one
+/// definition of how "~/.claude.json*"-style globs match, shared by the
+/// guard, the bind-back skip, the wipe, migrate, and the sync-out so they
+/// cannot drift apart.
+pub fn name_starts_with(name: &OsStr, prefix: &str) -> bool {
+    name.as_bytes().starts_with(prefix.as_bytes())
+}
+
+/// Sorted paths of `dir` entries whose names begin with `prefix`.
+pub fn entries_with_prefix(dir: &Path, prefix: &str) -> std::io::Result<Vec<PathBuf>> {
+    let mut matches: Vec<PathBuf> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| name_starts_with(&e.file_name(), prefix))
+        .map(|e| e.path())
+        .collect();
+    matches.sort();
+    Ok(matches)
+}
+
 /// Quote for interpolation into a shell command line (like bash's ${var@Q}).
 pub fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
+}
+
+/// Sleep for `secs`. MITTENS_DELAY_SECS overrides the duration (its only
+/// purpose is letting the test suite run the countdown paths instantly).
+pub fn pause(secs: u64) {
+    let secs = std::env::var("MITTENS_DELAY_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(secs);
+    std::thread::sleep(std::time::Duration::from_secs(secs));
 }
 
 /// PIDs of running processes with exactly this name, via pgrep(1).

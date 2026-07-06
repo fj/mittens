@@ -4,7 +4,6 @@
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
@@ -12,7 +11,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::service::Ctx;
-use crate::util::{is_executable, shell_quote, which};
+use crate::util::{entries_with_prefix, is_executable, name_starts_with, shell_quote, which};
 use crate::wipe;
 
 pub enum Mode {
@@ -60,7 +59,7 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
     // launching.
     if skipped {
         eprintln!("mittens: starting {} in 3s…", ctx.svc.name());
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        crate::util::pause(3);
     }
 
     // Re-exec this binary inside the namespace as the hidden __inner
@@ -68,15 +67,7 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
     // file bind-mount) around the tool run.
     let exe = std::env::current_exe().context("resolving own executable")?;
     let mut cmd = Command::new("bwrap");
-    cmd.args(&bwrap)
-        .arg("--")
-        .arg(exe)
-        .arg("__inner")
-        .arg(&ctx.state)
-        .arg(bin)
-        .arg(ctx.svc.sync_file().unwrap_or(""))
-        .arg("--")
-        .args(args);
+    cmd.args(&bwrap).arg("--").arg(exe).args(crate::inner::argv(ctx, bin)).args(args);
     Err(cmd.exec()).context("exec bwrap")
 }
 
@@ -114,8 +105,10 @@ fn stray_paths(ctx: &Ctx) -> Result<Vec<String>> {
         stray.push(format!("~/{}", ctx.svc.dot()));
     }
     if let Some(sync) = ctx.svc.sync_file() {
-        for name in sorted_home_entries(&ctx.home)? {
-            if name.as_bytes().starts_with(sync.as_bytes()) {
+        for path in entries_with_prefix(&ctx.home, sync)
+            .with_context(|| format!("reading {}", ctx.home.display()))?
+        {
+            if let Some(name) = path.file_name() {
                 stray.push(format!("~/{}", name.to_string_lossy()));
             }
         }
@@ -136,7 +129,7 @@ pub fn bwrap_args(ctx: &Ctx, git_ssh_command_set: bool) -> Result<Vec<OsString>>
             continue;
         }
         if let Some(sync) = sync
-            && name.as_bytes().starts_with(sync.as_bytes())
+            && name_starts_with(&name, sync)
         {
             continue;
         }
@@ -258,6 +251,14 @@ mod tests {
         assert!(!args.iter().any(|a| a.contains("CLAUDE.md") || a.contains("/agents")));
         // Preexisting GIT_SSH_COMMAND wins: no --setenv.
         assert!(!args.contains(&"--setenv".to_string()));
+    }
+
+    #[test]
+    fn missing_user_ssh_config_falls_back_to_dev_null() {
+        let (_tmp, ctx) = scratch_ctx(Service::Claude);
+        fs::remove_file(ctx.home.join(".ssh/config")).unwrap();
+        let args = strs(&bwrap_args(&ctx, false).unwrap());
+        assert!(args.contains(&"ssh -F '/dev/null'".to_string()));
     }
 
     #[test]
