@@ -85,6 +85,8 @@ impl Harness {
             .env("MITTENS_CLAUDE_BIN", self.fake_bin.join("claude"))
             .env("MITTENS_OPENCODE_BIN", self.fake_bin.join("opencode"))
             .env("MITTENS_AGENTS_DIR", self.home.join(".config/agents"))
+            // Run the countdown/pause paths instantly.
+            .env("MITTENS_DELAY_SECS", "0")
             .output()
             .unwrap()
     }
@@ -291,6 +293,104 @@ fn help_shows_service_specific_values() {
     let text = stdout(&out);
     assert!(text.contains("Service:             opencode"));
     assert!(text.contains(&h.state.display().to_string()));
+}
+
+#[test]
+fn skip_pawmissions_wipes_stray_data_then_launches() {
+    let h = Harness::new();
+    fs::create_dir_all(h.home.join(".claude/projects")).unwrap();
+    fs::write(h.home.join(".claude/settings.json"), "{}").unwrap();
+    fs::write(h.home.join(".claude.json"), "{}").unwrap();
+    fs::write(h.home.join(".claude.json.backup"), "{}").unwrap();
+
+    let out = h.mittens(&["--dangerously-skip-pawmissions", "hello"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "stderr: {err}");
+    // Inspection listed all three targets, then deleted them.
+    assert!(err.contains("slated for deletion"));
+    assert_eq!(err.matches("mittens: wiped").count(), 3, "stderr: {err}");
+    assert!(err.contains(".claude.json.backup"));
+    // The dot dir stays gone (the fake bwrap doesn't isolate, so the stub
+    // recreates ~/.claude.json — but it never touches ~/.claude).
+    assert!(!h.home.join(".claude").exists());
+    // The guard then passed and the tool actually launched, seeing the
+    // freshly seeded (not the wiped) config.
+    assert!(stdout(&out).contains("ARGS: hello"));
+    assert!(stdout(&out).contains("{}"));
+}
+
+#[test]
+fn skip_pawmissions_with_clean_home_is_a_noop_launch() {
+    let h = Harness::new();
+    let out = h.mittens(&["--dangerously-skip-pawmissions", "hi"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("nothing to wipe"));
+    assert!(stdout(&out).contains("ARGS: hi"));
+}
+
+#[test]
+fn migrate_accepts_preexisting_empty_dot_state() {
+    let h = Harness::new();
+    fs::create_dir_all(h.state.join("dot-claude")).unwrap();
+    fs::create_dir_all(h.home.join(".claude")).unwrap();
+    fs::write(h.home.join(".claude/settings.json"), "{}").unwrap();
+
+    let out = h.mittens(&["--migrate"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(h.state.join("dot-claude/settings.json").is_file());
+}
+
+#[test]
+fn signal_death_maps_to_128_plus_signal_and_still_syncs() {
+    let h = Harness::new();
+    h.script(
+        "claude",
+        r#"#!/usr/bin/env bash
+echo '{"partial":true}' > "$HOME/.claude.json.tmp"
+mv "$HOME/.claude.json.tmp" "$HOME/.claude.json"
+kill -TERM $$
+"#,
+    );
+    let out = h.mittens(&["hello"]);
+    assert_eq!(out.status.code(), Some(128 + 15));
+    // sync-out still ran after the signal death.
+    assert_eq!(fs::read_to_string(h.state.join("claude.json")).unwrap(), "{\"partial\":true}\n");
+}
+
+#[test]
+fn inner_rejects_malformed_argv() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mittens"))
+        .args(["__inner", "only-one-arg"])
+        .env_clear()
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("__inner expects"));
+}
+
+#[test]
+fn claude_unsafe_does_not_reseed_on_later_runs() {
+    let h = Harness::new();
+    fs::create_dir_all(&h.state).unwrap();
+    fs::write(h.state.join("claude.json"), "{\"wrapped\":1}").unwrap();
+
+    let out = h.mittens(&["--unsafe", "first"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    // Unsandboxed, the stub wrote real ~/.claude.json* — clear them so the
+    // second run passes the guard (a real unsafe claude writes to
+    // CLAUDE_CONFIG_DIR instead).
+    for stray in [".claude.json", ".claude.json.backup"] {
+        let _ = fs::remove_file(h.home.join(stray));
+    }
+
+    // The unsafe copy evolves independently after the one-time seeding.
+    fs::write(h.state.join("dot-claude/.claude.json"), "{\"diverged\":1}").unwrap();
+    let out = h.mittens(&["--unsafe", "second"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(h.state.join("dot-claude/.claude.json")).unwrap(),
+        "{\"diverged\":1}"
+    );
 }
 
 #[test]
