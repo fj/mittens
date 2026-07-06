@@ -18,7 +18,10 @@ pub fn run(ctx: &Ctx) -> Result<()> {
 
     let home_dot = ctx.home_dot();
     let dot_state = ctx.dot_state();
-    if home_dot.is_dir() {
+    // symlink_metadata, not is_dir: the guard trips on anything at ~/.<name>
+    // (a dangling symlink included), so migrate must move anything too —
+    // otherwise it reports success while the guard keeps advising --migrate.
+    if home_dot.symlink_metadata().is_ok() {
         if dot_state.symlink_metadata().is_ok() {
             if fs::read_dir(&dot_state).map(|mut d| d.next().is_some()).unwrap_or(true) {
                 bail!("refusing to migrate: {} already contains data", dot_state.display());

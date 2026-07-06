@@ -219,6 +219,21 @@ fn migrate_moves_dot_dir_sync_file_and_backups() {
 }
 
 #[test]
+fn migrate_moves_a_dangling_symlink() {
+    // The guard trips on a dangling ~/.claude symlink, so migrate must move
+    // it too instead of reporting success while the guard keeps refusing.
+    let h = Harness::new();
+    std::os::unix::fs::symlink("/nonexistent", h.home.join(".claude")).unwrap();
+
+    let out = h.mittens(&["--migrate"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("moved ~/.claude ->"));
+    // The symlink itself moved: the guard has nothing left to trip on.
+    assert!(h.home.join(".claude").symlink_metadata().is_err());
+    assert!(h.state.join("dot-claude").symlink_metadata().unwrap().is_symlink());
+}
+
+#[test]
 fn migrate_refuses_while_tool_runs() {
     let h = Harness::new();
     h.script("pgrep", "#!/usr/bin/env bash\necho 4242\n");
