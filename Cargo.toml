@@ -1,0 +1,12 @@
+[package]
+name = "mittens"
+version = "0.1.0"
+edition = "2024"
+description = "Run coding agents with clean paws: home-dir cruft redirected to XDG locations via bubblewrap"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
