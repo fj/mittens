@@ -336,6 +336,11 @@ fn unknown_harness_is_rejected() {
     let err = stderr(&out);
     assert!(err.contains("unknown harness \"emacs\""));
     assert!(err.contains("claude, opencode"));
+
+    // An empty name is an unknown harness, not a passthrough.
+    let out = h.mittens(&["harness:"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("unknown harness \"\""));
 }
 
 #[test]
