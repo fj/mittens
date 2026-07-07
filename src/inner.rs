@@ -14,7 +14,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::service::Ctx;
+use crate::harness::Ctx;
 use crate::util::entries_with_prefix;
 
 pub const SUBCOMMAND: &str = "__inner";
@@ -31,7 +31,7 @@ pub fn argv(ctx: &Ctx, bin: &Path) -> Vec<OsString> {
         SUBCOMMAND.into(),
         ctx.state.clone().into(),
         bin.into(),
-        ctx.svc.sync_file().unwrap_or("").into(),
+        ctx.harness.sync_file().unwrap_or("").into(),
         state_name,
         "--".into(),
     ]

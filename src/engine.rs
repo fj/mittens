@@ -1,4 +1,4 @@
-//! Service-agnostic launch machinery: the startup guard, bwrap argument
+//! Harness-agnostic launch machinery: the startup guard, bwrap argument
 //! assembly, and the exec into the namespace.
 
 use std::convert::Infallible;
@@ -10,7 +10,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::service::Ctx;
+use crate::harness::Ctx;
 use crate::util::{entries_with_prefix, is_executable, name_starts_with, shell_quote, which};
 use crate::wipe;
 
@@ -27,8 +27,8 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
     }
     let bin = match ctx.bin.as_deref() {
         Some(bin) if is_executable(bin) => bin,
-        Some(bin) => bail!("{} binary not found at {}", ctx.svc.name(), bin.display()),
-        None => bail!("{} binary not found", ctx.svc.name()),
+        Some(bin) => bail!("{} binary not found at {}", ctx.harness.name(), bin.display()),
+        None => bail!("{} binary not found", ctx.harness.name()),
     };
 
     // Optionally wipe the real-home data before the guard runs, so that the
@@ -43,7 +43,7 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
         .with_context(|| format!("creating {}", ctx.dot_state().display()))?;
 
     if matches!(mode, Mode::Unsafe) {
-        return ctx.svc.unsafe_exec(ctx, bin, args);
+        return ctx.harness.unsafe_exec(ctx, bin, args);
     }
 
     if let Some(sync_state) = ctx.sync_state()
@@ -58,7 +58,7 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
     // After a --dangerously-skip-pawmissions wipe, pause briefly before
     // launching.
     if skipped {
-        eprintln!("mittens: starting {} in 3s…", ctx.svc.name());
+        eprintln!("mittens: starting {} in 3s…", ctx.harness.name());
         crate::util::pause(3);
     }
 
@@ -71,7 +71,7 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
     Err(cmd.exec()).context("exec bwrap")
 }
 
-/// Hard guard: refuse to run while any of the service's data exists in the
+/// Hard guard: refuse to run while any of the harness's data exists in the
 /// real home. It would be shadowed and ignored inside the namespace, so
 /// anything in it (fresh credentials, config edits from an unwrapped run)
 /// would silently diverge from the state directory that wrapped sessions
@@ -81,7 +81,7 @@ fn guard(ctx: &Ctx) -> Result<()> {
     if stray.is_empty() {
         return Ok(());
     }
-    let svc = ctx.svc.name();
+    let harness = ctx.harness.name();
     eprintln!("mittens: refusing to start: found {} in the real home", stray.join(" "));
     let dot_state = ctx.dot_state();
     let populated = fs::read_dir(&dot_state).map(|mut d| d.next().is_some()).unwrap_or(false);
@@ -90,21 +90,25 @@ fn guard(ctx: &Ctx) -> Result<()> {
             "mittens: the state directory ({}) is already populated, so this is",
             ctx.state.display()
         );
-        eprintln!("mittens: probably leftover from an unwrapped {svc} run; inspect it and either");
+        eprintln!(
+            "mittens: probably leftover from an unwrapped {harness} run; inspect it and either"
+        );
         eprintln!("mittens: delete it or reconcile it with the state directory by hand");
     } else {
-        eprintln!("mittens: close all {svc} sessions and run: mittens {svc} --migrate");
+        eprintln!(
+            "mittens: close all {harness} sessions and run: mittens harness:{harness} --migrate"
+        );
     }
     std::process::exit(1);
 }
 
-/// The service's real-home paths that exist right now, as ~/-relative strings.
+/// The harness's real-home paths that exist right now, as ~/-relative strings.
 fn stray_paths(ctx: &Ctx) -> Result<Vec<String>> {
     let mut stray = Vec::new();
     if ctx.home_dot().symlink_metadata().is_ok() {
-        stray.push(format!("~/{}", ctx.svc.dot()));
+        stray.push(format!("~/{}", ctx.harness.dot()));
     }
-    if let Some(sync) = ctx.svc.sync_file() {
+    if let Some(sync) = ctx.harness.sync_file() {
         for path in entries_with_prefix(&ctx.home, sync)
             .with_context(|| format!("reading {}", ctx.home.display()))?
         {
@@ -123,9 +127,9 @@ pub fn bwrap_args(ctx: &Ctx, git_ssh_command_set: bool) -> Result<Vec<OsString>>
     let mut args: Vec<OsString> =
         vec!["--dev-bind".into(), "/".into(), "/".into(), "--tmpfs".into(), ctx.home.clone().into()];
 
-    let sync = ctx.svc.sync_file();
+    let sync = ctx.harness.sync_file();
     for name in sorted_home_entries(&ctx.home)? {
-        if name.as_os_str() == ctx.svc.dot() {
+        if name.as_os_str() == ctx.harness.dot() {
             continue;
         }
         if let Some(sync) = sync
@@ -158,7 +162,7 @@ pub fn bwrap_args(ctx: &Ctx, git_ssh_command_set: bool) -> Result<Vec<OsString>>
         args.push(format!("ssh -F {}", shell_quote(&ssh_cfg)).into());
     }
 
-    args.extend(ctx.svc.extra_mounts(ctx)?);
+    args.extend(ctx.harness.extra_bwrap_args(ctx)?);
     Ok(args)
 }
 
@@ -176,17 +180,17 @@ fn sorted_home_entries(home: &Path) -> Result<Vec<OsString>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::Service;
+    use crate::harness::Harness;
     use std::path::PathBuf;
 
-    fn scratch_ctx(svc: Service) -> (tempfile::TempDir, Ctx) {
+    fn scratch_ctx(harness: Harness) -> (tempfile::TempDir, Ctx) {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         fs::create_dir_all(home.join("docs")).unwrap();
         fs::create_dir_all(home.join(".ssh")).unwrap();
         fs::write(home.join(".ssh/config"), "Host *\n").unwrap();
         let ctx = Ctx {
-            svc,
+            harness,
             home: home.clone(),
             bin: Some(PathBuf::from("/bin/true")),
             state: tmp.path().join("state"),
@@ -202,7 +206,7 @@ mod tests {
 
     #[test]
     fn claude_args_shadow_dot_and_sync_file_and_wire_agents() {
-        let (_tmp, ctx) = scratch_ctx(Service::Claude);
+        let (_tmp, ctx) = scratch_ctx(Harness::Claude);
         // Stray-looking entries inside home must be skipped from the binds
         // (inside the namespace they are shadowed, not bound back).
         fs::create_dir_all(ctx.home.join(".claude")).unwrap();
@@ -239,7 +243,7 @@ mod tests {
 
     #[test]
     fn opencode_args_have_no_sync_or_agent_wiring() {
-        let (_tmp, ctx) = scratch_ctx(Service::Opencode);
+        let (_tmp, ctx) = scratch_ctx(Harness::Opencode);
         fs::create_dir_all(ctx.agents_cfg.join("agents")).unwrap();
 
         let args = strs(&bwrap_args(&ctx, true).unwrap());
@@ -255,7 +259,7 @@ mod tests {
 
     #[test]
     fn missing_user_ssh_config_falls_back_to_dev_null() {
-        let (_tmp, ctx) = scratch_ctx(Service::Claude);
+        let (_tmp, ctx) = scratch_ctx(Harness::Claude);
         fs::remove_file(ctx.home.join(".ssh/config")).unwrap();
         let args = strs(&bwrap_args(&ctx, false).unwrap());
         assert!(args.contains(&"ssh -F '/dev/null'".to_string()));
@@ -263,16 +267,16 @@ mod tests {
 
     #[test]
     fn stray_detection_matches_guard_globs() {
-        let (_tmp, ctx) = scratch_ctx(Service::Claude);
+        let (_tmp, ctx) = scratch_ctx(Harness::Claude);
         assert!(stray_paths(&ctx).unwrap().is_empty());
         fs::write(ctx.home.join(".claude.json.corrupt.bak"), "{}").unwrap();
         assert_eq!(stray_paths(&ctx).unwrap(), vec!["~/.claude.json.corrupt.bak"]);
         fs::create_dir_all(ctx.home.join(".claude")).unwrap();
         assert_eq!(stray_paths(&ctx).unwrap(), vec!["~/.claude", "~/.claude.json.corrupt.bak"]);
 
-        let (_tmp, octx) = scratch_ctx(Service::Opencode);
+        let (_tmp, octx) = scratch_ctx(Harness::Opencode);
         fs::write(octx.home.join(".opencode-lookalike"), "").unwrap();
-        // Only the exact dot-dir counts for services without a sync file.
+        // Only the exact dot-dir counts for harnesses without a sync file.
         assert!(stray_paths(&octx).unwrap().is_empty());
         fs::create_dir_all(octx.home.join(".opencode")).unwrap();
         assert_eq!(stray_paths(&octx).unwrap(), vec!["~/.opencode"]);

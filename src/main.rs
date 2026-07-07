@@ -4,19 +4,21 @@
 //! instead of following the XDG Base Directory spec. mittens runs the agent
 //! inside a private mount namespace (via bubblewrap) where those paths are
 //! redirected to an XDG-compliant state directory, so the real home directory
-//! stays free of tool cruft. See README.md for the full story; src/service.rs
+//! stays free of tool cruft. See README.md for the full story; src/harness.rs
 //! for what each supported tool needs; src/engine.rs for the namespace.
 
 use std::ffi::OsString;
 
 mod engine;
+mod harness;
 mod inner;
 mod migrate;
-mod service;
 mod util;
 mod wipe;
 
-use service::{Ctx, Service};
+use harness::{Ctx, Harness};
+
+const HARNESS_PREFIX: &str = "harness:";
 
 fn main() {
     let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -26,22 +28,43 @@ fn main() {
         inner::run(&args[1..]);
     }
 
-    // The service name is only recognized as the first argument; anything
-    // else means claude, for compatibility with pre-service invocations.
-    let svc = match args.first().and_then(|a| a.to_str()).and_then(Service::from_name) {
-        Some(svc) => {
-            args.remove(0);
-            svc
+    // The harness must be selected explicitly, as harness:<name> in the first
+    // argument; there is no default.
+    let harness = match args.first().and_then(|a| a.to_str()) {
+        Some("-h" | "--help") => {
+            print!("{}", usage(None));
+            return;
         }
-        None => Service::Claude,
+        Some(arg) if arg.starts_with(HARNESS_PREFIX) => {
+            let name = &arg[HARNESS_PREFIX.len()..];
+            match Harness::from_name(name) {
+                Some(harness) => {
+                    args.remove(0);
+                    harness
+                }
+                None => fail(anyhow::anyhow!(
+                    "unknown harness \"{name}\" (known harnesses: {})",
+                    Harness::known()
+                )),
+            }
+        }
+        Some(name) if Harness::from_name(name).is_some() => fail(anyhow::anyhow!(
+            "the harness must be selected as harness:<name>; \
+             did you mean \"mittens {HARNESS_PREFIX}{name}\"?"
+        )),
+        _ => fail(anyhow::anyhow!(
+            "the first argument must select a harness: {HARNESS_PREFIX}<name>, \
+             where <name> is one of: {} (see mittens --help)",
+            Harness::known()
+        )),
     };
-    let ctx = Ctx::resolve(svc);
+    let ctx = Ctx::resolve(harness);
 
-    // Flags are intercepted only directly after the (optional) service name;
+    // Flags are intercepted only directly after the harness selector;
     // everything else is passed through to the tool unchanged.
     let mode = match args.first().and_then(|a| a.to_str()) {
         Some("-h" | "--help") => {
-            print!("{}", usage(&ctx));
+            print!("{}", usage(Some(&ctx)));
             return;
         }
         Some("--migrate") => {
@@ -74,21 +97,22 @@ fn fail(err: anyhow::Error) -> ! {
     std::process::exit(1);
 }
 
-fn usage(ctx: &Ctx) -> String {
-    format!(
+fn usage(ctx: Option<&Ctx>) -> String {
+    let generic = format!(
         r#"mittens — run coding agents with their home-dir cruft redirected to XDG
 
 Usage:
-  mittens [service] [arguments...]
-                                  run the service inside the namespace;
-                                  service is claude or opencode and defaults
-                                  to claude
-  mittens [service] --migrate     move the service's existing real-home data
+  mittens harness:<name> [arguments...]
+                                  run the harness inside the namespace;
+                                  <name> is one of: {known}, and must
+                                  always be given explicitly
+  mittens harness:<name> --migrate
+                                  move the harness's existing real-home data
                                   (claude: ~/.claude and ~/.claude.json;
                                   opencode: ~/.opencode) into its state
                                   directory (run this once, with no sessions
-                                  of the service running)
-  mittens [service] --unsafe [arguments...]
+                                  of the harness running)
+  mittens harness:<name> --unsafe [arguments...]
                                   skip the sandbox: exec the tool directly
                                   with its relocation variable pointing at
                                   the state dir. claude only, via
@@ -100,28 +124,37 @@ Usage:
                                   dot-claude/.claude.json (seeded once from
                                   claude.json, independent of wrapped runs
                                   after that)
-  mittens [service] --dangerously-skip-pawmissions [arguments...]
-                                  inspect the service's real-home data, count
+  mittens harness:<name> --dangerously-skip-pawmissions [arguments...]
+                                  inspect the harness's real-home data, count
                                   down, then DELETE it (rm -rf) to clear the
                                   startup guard, and launch anyway. Destroys
                                   data. Only use when you are certain the
                                   real-home copy is disposable leftover.
   mittens --help | -h             show this help
 
-The service name is only recognized as the first argument; --migrate,
---unsafe, --dangerously-skip-pawmissions, --help, and -h only directly after
-it. Everything else is passed through to the tool unchanged (so "mittens
-config get theme" etc. work as expected; for the tool's own help, run
-"mittens [service] help").
-
-Service:             {svc}
+harness:<name> is only recognized as the first argument; --migrate, --unsafe,
+--dangerously-skip-pawmissions, --help, and -h only directly after it.
+Everything else is passed through to the tool unchanged (so "mittens
+harness:claude config get theme" etc. work as expected; for the tool's own
+help, run "mittens harness:<name> help").
+"#,
+        known = Harness::known(),
+    );
+    let Some(ctx) = ctx else {
+        return format!(
+            "{generic}\nRun mittens harness:<name> --help to see that harness's resolved paths.\n"
+        );
+    };
+    format!(
+        r#"{generic}
+Harness:             {harness}
 State directory:     {state}
 Binary:              {bin}
 Shared agent config: {agents} (used by the claude wiring only)
 (Override with MITTENS_STATE_DIR / MITTENS_CLAUDE_BIN / MITTENS_OPENCODE_BIN
 / MITTENS_AGENTS_DIR.)
 "#,
-        svc = ctx.svc.name(),
+        harness = ctx.harness.name(),
         state = ctx.state.display(),
         bin = ctx.bin.as_ref().map_or("(not found)".into(), |b| b.display().to_string()),
         agents = ctx.agents_cfg.display(),

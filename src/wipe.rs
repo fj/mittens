@@ -10,20 +10,20 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::service::Ctx;
+use crate::harness::Ctx;
 use crate::util::{entries_with_prefix, human_size, pause, pgrep};
 
 pub fn skip_pawmissions(ctx: &Ctx) -> Result<()> {
-    let svc = ctx.svc.name();
+    let harness = ctx.harness.name();
     let targets = targets(ctx)?;
 
     eprintln!("mittens: --dangerously-skip-pawmissions");
     if targets.is_empty() {
-        eprintln!("mittens: no real-home {svc} data ({}); nothing to wipe", ctx.guard_names());
+        eprintln!("mittens: no real-home {harness} data ({}); nothing to wipe", ctx.guard_names());
         return Ok(());
     }
 
-    eprintln!("mittens: inspecting real-home {svc} data slated for deletion:");
+    eprintln!("mittens: inspecting real-home {harness} data slated for deletion:");
     for t in &targets {
         inspect(t);
     }
@@ -32,10 +32,10 @@ pub fn skip_pawmissions(ctx: &Ctx) -> Result<()> {
     // state dir, not the real home, but an unwrapped run may be writing to
     // the very files about to be deleted. Informational only — this is the
     // dangerous path.
-    let pids = pgrep(svc);
+    let pids = pgrep(harness);
     if !pids.is_empty() {
         eprintln!();
-        eprintln!("mittens: WARNING — {svc} appears to be running ({}):", pids.join(", "));
+        eprintln!("mittens: WARNING — {harness} appears to be running ({}):", pids.join(", "));
         if let Ok(out) =
             Command::new("ps").args(["-o", "pid=,etime=,args=", "-p", &pids.join(",")]).output()
         {
@@ -68,7 +68,7 @@ fn targets(ctx: &Ctx) -> Result<Vec<PathBuf>> {
     if ctx.home_dot().symlink_metadata().is_ok() {
         targets.push(ctx.home_dot());
     }
-    if let Some(sync) = ctx.svc.sync_file() {
+    if let Some(sync) = ctx.harness.sync_file() {
         targets.extend(
             entries_with_prefix(&ctx.home, sync)
                 .with_context(|| format!("reading {}", ctx.home.display()))?,

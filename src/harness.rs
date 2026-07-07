@@ -1,9 +1,9 @@
-//! Service handlers: everything tool-specific lives here.
+//! Harness handlers: everything tool-specific lives here.
 //!
-//! Each service defines the endpoints mittens must know about — the binary,
+//! Each harness defines the endpoints mittens must know about — the binary,
 //! which real-home path the tool hardcodes, whether a top-level config file
 //! needs copy-sync, whether an unsandboxed fallback exists, and what extra
-//! mounts to wire. Everything outside this module is service-agnostic.
+//! mounts to wire. Everything outside this module is harness-agnostic.
 
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -17,18 +17,16 @@ use anyhow::{Context, Result, bail};
 use crate::util::which;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Service {
+pub enum Harness {
     Claude,
     Opencode,
 }
 
-impl Service {
+impl Harness {
+    pub const ALL: [Harness; 2] = [Self::Claude, Self::Opencode];
+
     pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "claude" => Some(Self::Claude),
-            "opencode" => Some(Self::Opencode),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|h| h.name() == name)
     }
 
     pub fn name(self) -> &'static str {
@@ -36,6 +34,11 @@ impl Service {
             Self::Claude => "claude",
             Self::Opencode => "opencode",
         }
+    }
+
+    /// Comma-separated harness names, for error and help text.
+    pub fn known() -> String {
+        Self::ALL.map(Self::name).join(", ")
     }
 
     /// Top-level home entry the tool hardcodes; shadowed to `<state>/dot-<name>`.
@@ -108,8 +111,8 @@ impl Service {
         }
     }
 
-    /// Service-specific bwrap mounts, appended after the generic ones.
-    pub fn extra_mounts(self, ctx: &Ctx) -> Result<Vec<OsString>> {
+    /// Harness-specific bwrap arguments, appended after the generic ones.
+    pub fn extra_bwrap_args(self, ctx: &Ctx) -> Result<Vec<OsString>> {
         match self {
             Self::Claude => claude_shared_agent_mounts(ctx),
             // opencode's global config is the real, XDG-proper
@@ -165,9 +168,9 @@ fn claude_shared_agent_mounts(ctx: &Ctx) -> Result<Vec<OsString>> {
     Ok(args)
 }
 
-/// Everything resolved once from the environment for the selected service.
+/// Everything resolved once from the environment for the selected harness.
 pub struct Ctx {
-    pub svc: Service,
+    pub harness: Harness,
     pub home: PathBuf,
     /// The tool's executable; None if it could not be found.
     pub bin: Option<PathBuf>,
@@ -176,17 +179,17 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    pub fn resolve(svc: Service) -> Self {
-        Self::resolve_with(svc, &|k| std::env::var_os(k))
+    pub fn resolve(harness: Harness) -> Self {
+        Self::resolve_with(harness, &|k| std::env::var_os(k))
     }
 
-    pub fn resolve_with(svc: Service, env: &dyn Fn(&str) -> Option<OsString>) -> Self {
+    pub fn resolve_with(harness: Harness, env: &dyn Fn(&str) -> Option<OsString>) -> Self {
         let home = PathBuf::from(env("HOME").expect("HOME is not set"));
         let state = env("MITTENS_STATE_DIR").map(PathBuf::from).unwrap_or_else(|| {
             env("XDG_STATE_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".local/state"))
-                .join(svc.state_leaf())
+                .join(harness.state_leaf())
         });
         let agents_cfg = env("MITTENS_AGENTS_DIR").map(PathBuf::from).unwrap_or_else(|| {
             env("XDG_CONFIG_HOME")
@@ -194,32 +197,32 @@ impl Ctx {
                 .unwrap_or_else(|| home.join(".config"))
                 .join("agents")
         });
-        let bin = env(svc.bin_env())
+        let bin = env(harness.bin_env())
             .map(PathBuf::from)
-            .or_else(|| svc.default_bin(&home, env));
-        Ctx { svc, home, bin, state, agents_cfg }
+            .or_else(|| harness.default_bin(&home, env));
+        Ctx { harness, home, bin, state, agents_cfg }
     }
 
     /// `<state>/dot-<name>` — mounted over `~/.<name>` inside the namespace.
     pub fn dot_state(&self) -> PathBuf {
-        self.state.join(format!("dot-{}", &self.svc.dot()[1..]))
+        self.state.join(format!("dot-{}", &self.harness.dot()[1..]))
     }
 
     /// Host-side home of the copy-synced config file (`<state>/claude.json`).
     pub fn sync_state(&self) -> Option<PathBuf> {
-        self.svc.sync_file().map(|f| self.state.join(&f[1..]))
+        self.harness.sync_file().map(|f| self.state.join(&f[1..]))
     }
 
     /// The real-home path the tool hardcodes (`~/.claude`, `~/.opencode`).
     pub fn home_dot(&self) -> PathBuf {
-        self.home.join(self.svc.dot())
+        self.home.join(self.harness.dot())
     }
 
     /// Human-readable list of the real-home paths the startup guard checks.
     pub fn guard_names(&self) -> String {
-        match self.svc.sync_file() {
-            Some(sync) => format!("~/{} or ~/{}*", self.svc.dot(), sync),
-            None => format!("~/{}", self.svc.dot()),
+        match self.harness.sync_file() {
+            Some(sync) => format!("~/{} or ~/{}*", self.harness.dot(), sync),
+            None => format!("~/{}", self.harness.dot()),
         }
     }
 }
@@ -240,16 +243,16 @@ mod tests {
     }
 
     #[test]
-    fn resolves_defaults_per_service() {
+    fn resolves_defaults_per_harness() {
         let env = env_from(&[("HOME", "/h")]);
-        let c = Ctx::resolve_with(Service::Claude, &env);
+        let c = Ctx::resolve_with(Harness::Claude, &env);
         assert_eq!(c.state, PathBuf::from("/h/.local/state/claude-home"));
         assert_eq!(c.dot_state(), PathBuf::from("/h/.local/state/claude-home/dot-claude"));
         assert_eq!(c.sync_state(), Some(PathBuf::from("/h/.local/state/claude-home/claude.json")));
         assert_eq!(c.bin, Some(PathBuf::from("/h/.local/bin/claude")));
         assert_eq!(c.agents_cfg, PathBuf::from("/h/.config/agents"));
 
-        let o = Ctx::resolve_with(Service::Opencode, &env);
+        let o = Ctx::resolve_with(Harness::Opencode, &env);
         assert_eq!(o.state, PathBuf::from("/h/.local/state/opencode-home"));
         assert_eq!(o.dot_state(), PathBuf::from("/h/.local/state/opencode-home/dot-opencode"));
         assert_eq!(o.sync_state(), None);
@@ -265,21 +268,22 @@ mod tests {
             ("MITTENS_AGENTS_DIR", "/cfg/agents"),
             ("XDG_STATE_HOME", "/xdg-state"),
         ]);
-        let c = Ctx::resolve_with(Service::Claude, &env);
+        let c = Ctx::resolve_with(Harness::Claude, &env);
         assert_eq!(c.state, PathBuf::from("/elsewhere"));
         assert_eq!(c.bin, Some(PathBuf::from("/opt/claude")));
         assert_eq!(c.agents_cfg, PathBuf::from("/cfg/agents"));
 
         let env = env_from(&[("HOME", "/h"), ("XDG_STATE_HOME", "/xdg-state")]);
-        let c = Ctx::resolve_with(Service::Claude, &env);
+        let c = Ctx::resolve_with(Harness::Claude, &env);
         assert_eq!(c.state, PathBuf::from("/xdg-state/claude-home"));
     }
 
     #[test]
-    fn service_names_round_trip() {
-        for svc in [Service::Claude, Service::Opencode] {
-            assert_eq!(Service::from_name(svc.name()), Some(svc));
+    fn harness_names_round_trip() {
+        for harness in Harness::ALL {
+            assert_eq!(Harness::from_name(harness.name()), Some(harness));
         }
-        assert_eq!(Service::from_name("emacs"), None);
+        assert_eq!(Harness::from_name("emacs"), None);
+        assert_eq!(Harness::known(), "claude, opencode");
     }
 }

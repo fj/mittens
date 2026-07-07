@@ -112,7 +112,7 @@ fn claude_wrapped_run_syncs_and_passes_args_through() {
     fs::create_dir_all(h.home.join(".config/agents/agents")).unwrap();
     fs::write(h.home.join(".config/agents/AGENTS.md"), "# memory\n").unwrap();
 
-    let out = h.mittens(&["hello", "--flag", "config"]);
+    let out = h.mittens(&["harness:claude", "hello", "--flag", "config"]);
     let text = stdout(&out);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
 
@@ -156,7 +156,7 @@ fn opencode_wrapped_run_binds_dot_opencode_only_and_propagates_exit() {
     let h = Harness::new();
     fs::create_dir_all(h.home.join(".config/agents/agents")).unwrap();
 
-    let out = h.mittens(&["opencode", "do-stuff", "-x"]);
+    let out = h.mittens(&["harness:opencode", "do-stuff", "-x"]);
     let text = stdout(&out);
 
     let home = h.home.display().to_string();
@@ -180,16 +180,16 @@ fn guard_refuses_stray_home_data() {
     fs::create_dir_all(h.home.join(".claude")).unwrap();
     fs::write(h.home.join(".claude.json.backup"), "{}").unwrap();
 
-    let out = h.mittens(&["hello"]);
+    let out = h.mittens(&["harness:claude", "hello"]);
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1));
     assert!(err.contains("refusing to start: found ~/.claude ~/.claude.json.backup in the real home"));
-    assert!(err.contains("run: mittens claude --migrate"));
+    assert!(err.contains("run: mittens harness:claude --migrate"));
 
     // Populated state directory changes the advice.
     fs::create_dir_all(h.state.join("dot-claude")).unwrap();
     fs::write(h.state.join("dot-claude/settings.json"), "{}").unwrap();
-    let out = h.mittens(&["hello"]);
+    let out = h.mittens(&["harness:claude", "hello"]);
     assert!(stderr(&out).contains("state directory"));
     assert!(stderr(&out).contains("leftover from an unwrapped claude run"));
 }
@@ -201,7 +201,7 @@ fn migrate_moves_dot_dir_sync_file_and_backups() {
     fs::write(h.home.join(".claude.json"), "{\"real\":1}").unwrap();
     fs::write(h.home.join(".claude.json.backup"), "{\"old\":1}").unwrap();
 
-    let out = h.mittens(&["--migrate"]);
+    let out = h.mittens(&["harness:claude", "--migrate"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("moved ~/.claude ->"));
@@ -215,7 +215,7 @@ fn migrate_moves_dot_dir_sync_file_and_backups() {
 
     // A second migrate with a repopulated home refuses to clobber state.
     fs::create_dir_all(h.home.join(".claude")).unwrap();
-    let out = h.mittens(&["--migrate"]);
+    let out = h.mittens(&["harness:claude", "--migrate"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("refusing to migrate"));
 }
@@ -227,7 +227,7 @@ fn migrate_moves_a_dangling_symlink() {
     let h = Harness::new();
     std::os::unix::fs::symlink("/nonexistent", h.home.join(".claude")).unwrap();
 
-    let out = h.mittens(&["--migrate"]);
+    let out = h.mittens(&["harness:claude", "--migrate"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(stdout(&out).contains("moved ~/.claude ->"));
     // The symlink itself moved: the guard has nothing left to trip on.
@@ -239,7 +239,7 @@ fn migrate_moves_a_dangling_symlink() {
 fn migrate_refuses_while_tool_runs() {
     let h = Harness::new();
     h.script("pgrep", "#!/usr/bin/env bash\necho 4242\n");
-    let out = h.mittens(&["opencode", "--migrate"]);
+    let out = h.mittens(&["harness:opencode", "--migrate"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("opencode processes are running"));
 }
@@ -249,7 +249,7 @@ fn opencode_migrate_moves_dot_dir() {
     let h = Harness::new();
     fs::create_dir_all(h.home.join(".opencode/node_modules")).unwrap();
 
-    let out = h.mittens(&["opencode", "--migrate"]);
+    let out = h.mittens(&["harness:opencode", "--migrate"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(h.state.join("dot-opencode/node_modules").is_dir());
     assert!(!h.home.join(".opencode").exists());
@@ -261,7 +261,7 @@ fn claude_unsafe_sets_config_dir_and_seeds_top_level_config() {
     fs::create_dir_all(&h.state).unwrap();
     fs::write(h.state.join("claude.json"), "{\"wrapped\":1}").unwrap();
 
-    let out = h.mittens(&["--unsafe", "hi"]);
+    let out = h.mittens(&["harness:claude", "--unsafe", "hi"]);
     let text = stdout(&out);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(text.contains(&format!("CLAUDE_CONFIG_DIR={}/dot-claude", h.state.display())));
@@ -276,23 +276,66 @@ fn claude_unsafe_sets_config_dir_and_seeds_top_level_config() {
 #[test]
 fn opencode_unsafe_is_refused() {
     let h = Harness::new();
-    let out = h.mittens(&["opencode", "--unsafe"]);
+    let out = h.mittens(&["harness:opencode", "--unsafe"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("--unsafe is not supported for opencode"));
 }
 
 #[test]
-fn help_shows_service_specific_values() {
+fn help_shows_harness_specific_values() {
     let h = Harness::new();
-    let out = h.mittens(&["--help"]);
+    let out = h.mittens(&["harness:claude", "--help"]);
     assert!(out.status.success());
-    assert!(stdout(&out).contains("Service:             claude"));
+    assert!(stdout(&out).contains("Harness:             claude"));
 
-    let out = h.mittens(&["opencode", "-h"]);
+    let out = h.mittens(&["harness:opencode", "-h"]);
     assert!(out.status.success());
     let text = stdout(&out);
-    assert!(text.contains("Service:             opencode"));
+    assert!(text.contains("Harness:             opencode"));
     assert!(text.contains(&h.state.display().to_string()));
+
+    // Help works without a harness too, minus the resolved paths.
+    let out = h.mittens(&["--help"]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("mittens harness:<name> [arguments...]"));
+    assert!(!text.contains("State directory:"));
+}
+
+#[test]
+fn missing_harness_is_rejected() {
+    let h = Harness::new();
+    // No arguments at all.
+    let out = h.mittens(&[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("the first argument must select a harness"));
+
+    // Arbitrary tool args no longer default to claude.
+    let out = h.mittens(&["hello"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("the first argument must select a harness"));
+    assert!(err.contains("claude, opencode"));
+
+    // A bare harness name gets a did-you-mean.
+    let out = h.mittens(&["opencode", "run"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("did you mean \"mittens harness:opencode\"?"));
+
+    // Flags without a harness are rejected too.
+    let out = h.mittens(&["--migrate"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("the first argument must select a harness"));
+}
+
+#[test]
+fn unknown_harness_is_rejected() {
+    let h = Harness::new();
+    let out = h.mittens(&["harness:emacs", "hello"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("unknown harness \"emacs\""));
+    assert!(err.contains("claude, opencode"));
 }
 
 #[test]
@@ -303,7 +346,7 @@ fn skip_pawmissions_wipes_stray_data_then_launches() {
     fs::write(h.home.join(".claude.json"), "{}").unwrap();
     fs::write(h.home.join(".claude.json.backup"), "{}").unwrap();
 
-    let out = h.mittens(&["--dangerously-skip-pawmissions", "hello"]);
+    let out = h.mittens(&["harness:claude", "--dangerously-skip-pawmissions", "hello"]);
     let err = stderr(&out);
     assert!(out.status.success(), "stderr: {err}");
     // Inspection listed all three targets, then deleted them.
@@ -322,7 +365,7 @@ fn skip_pawmissions_wipes_stray_data_then_launches() {
 #[test]
 fn skip_pawmissions_with_clean_home_is_a_noop_launch() {
     let h = Harness::new();
-    let out = h.mittens(&["--dangerously-skip-pawmissions", "hi"]);
+    let out = h.mittens(&["harness:claude", "--dangerously-skip-pawmissions", "hi"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(stderr(&out).contains("nothing to wipe"));
     assert!(stdout(&out).contains("ARGS: hi"));
@@ -335,7 +378,7 @@ fn migrate_accepts_preexisting_empty_dot_state() {
     fs::create_dir_all(h.home.join(".claude")).unwrap();
     fs::write(h.home.join(".claude/settings.json"), "{}").unwrap();
 
-    let out = h.mittens(&["--migrate"]);
+    let out = h.mittens(&["harness:claude", "--migrate"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(h.state.join("dot-claude/settings.json").is_file());
 }
@@ -351,7 +394,7 @@ mv "$HOME/.claude.json.tmp" "$HOME/.claude.json"
 kill -TERM $$
 "#,
     );
-    let out = h.mittens(&["hello"]);
+    let out = h.mittens(&["harness:claude", "hello"]);
     assert_eq!(out.status.code(), Some(128 + 15));
     // sync-out still ran after the signal death.
     assert_eq!(fs::read_to_string(h.state.join("claude.json")).unwrap(), "{\"partial\":true}\n");
@@ -374,7 +417,7 @@ fn claude_unsafe_does_not_reseed_on_later_runs() {
     fs::create_dir_all(&h.state).unwrap();
     fs::write(h.state.join("claude.json"), "{\"wrapped\":1}").unwrap();
 
-    let out = h.mittens(&["--unsafe", "first"]);
+    let out = h.mittens(&["harness:claude", "--unsafe", "first"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     // Unsandboxed, the stub wrote real ~/.claude.json* — clear them so the
     // second run passes the guard (a real unsafe claude writes to
@@ -385,7 +428,7 @@ fn claude_unsafe_does_not_reseed_on_later_runs() {
 
     // The unsafe copy evolves independently after the one-time seeding.
     fs::write(h.state.join("dot-claude/.claude.json"), "{\"diverged\":1}").unwrap();
-    let out = h.mittens(&["--unsafe", "second"]);
+    let out = h.mittens(&["harness:claude", "--unsafe", "second"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert_eq!(
         fs::read_to_string(h.state.join("dot-claude/.claude.json")).unwrap(),
@@ -399,7 +442,7 @@ fn missing_bwrap_is_reported() {
     fs::remove_file(h.fake_bin.join("bwrap")).unwrap();
     // PATH must not include the real bwrap's directory for this one.
     let out = Command::new(env!("CARGO_BIN_EXE_mittens"))
-        .arg("hello")
+        .args(["harness:claude", "hello"])
         .env_clear()
         .env("HOME", &h.home)
         .env("PATH", &h.fake_bin)
@@ -414,7 +457,7 @@ fn missing_bwrap_is_reported() {
 fn missing_tool_binary_is_reported() {
     let h = Harness::new();
     fs::remove_file(h.fake_bin.join("claude")).unwrap();
-    let out = h.mittens(&["hello"]);
+    let out = h.mittens(&["harness:claude", "hello"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("claude binary not found at"));
 }

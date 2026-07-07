@@ -1,17 +1,17 @@
-//! --migrate: move the service's existing real-home data into its state
+//! --migrate: move the harness's existing real-home data into its state
 //! directory, once, so wrapped runs pick it up from there.
 
 use std::fs;
 
 use anyhow::{Context, Result, bail};
 
-use crate::service::Ctx;
+use crate::harness::Ctx;
 use crate::util::{entries_with_prefix, pgrep};
 
 pub fn run(ctx: &Ctx) -> Result<()> {
-    let svc = ctx.svc.name();
-    if !pgrep(svc).is_empty() {
-        bail!("{svc} processes are running; close all {svc} sessions before migrating");
+    let harness = ctx.harness.name();
+    if !pgrep(harness).is_empty() {
+        bail!("{harness} processes are running; close all {harness} sessions before migrating");
     }
     fs::create_dir_all(&ctx.state).with_context(|| format!("creating {}", ctx.state.display()))?;
 
@@ -28,10 +28,10 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             fs::remove_dir(&dot_state)?;
         }
         rename(&home_dot, &dot_state)?;
-        println!("moved ~/{} -> {}", ctx.svc.dot(), dot_state.display());
+        println!("moved ~/{} -> {}", ctx.harness.dot(), dot_state.display());
     }
 
-    if let (Some(sync), Some(sync_state)) = (ctx.svc.sync_file(), ctx.sync_state()) {
+    if let (Some(sync), Some(sync_state)) = (ctx.harness.sync_file(), ctx.sync_state()) {
         let home_sync = ctx.home.join(sync);
         if home_sync.is_file() {
             rename(&home_sync, &sync_state)?;

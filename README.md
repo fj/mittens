@@ -21,17 +21,17 @@ the kernel VFS layer, it applies to the tool and every subprocess it spawns
 does not depend on the tool honoring any environment variable, now or in
 future versions.
 
-## Services
+## Harnesses
 
 Everything tool-specific — the binary, which real-home paths to shadow,
 whether a top-level config file needs copy-sync, whether an unsandboxed
-fallback exists, and what extra mounts to wire — lives in a service handler
-(`src/service.rs`). The first argument selects the service and defaults to
-claude, so pre-service invocations keep working:
+fallback exists, and what extra mounts to wire — lives in a harness handler
+(`src/harness.rs`). The first argument selects the harness as
+`harness:<name>`; there is no default, and mittens refuses to run without an
+explicit harness:
 
-    mittens [claude arguments...]             # Claude Code (default)
-    mittens claude [claude arguments...]      # Claude Code
-    mittens opencode [opencode arguments...]  # opencode
+    mittens harness:claude [claude arguments...]      # Claude Code
+    mittens harness:opencode [opencode arguments...]  # opencode
 
 ### claude
 
@@ -87,7 +87,7 @@ symlinks, no sandbox required.
 
 ## Escape hatch
 
-`mittens [service] --unsafe` skips bubblewrap and just execs the tool with an
+`mittens harness:<name> --unsafe` skips bubblewrap and just execs the tool with an
 environment variable pointing at the state dir. Only claude supports it:
 Claude Code documents `CLAUDE_CONFIG_DIR` as relocating every `~/.claude`
 path, and it also moves the top-level config to
@@ -102,24 +102,24 @@ config *loading*; nothing relocates `~/.opencode` itself, so opencode refuses
 
 ## Other commands
 
-    mittens [service] --migrate
-        Move the service's existing real-home data into its state directory.
-        Run once, with no sessions of the service running.
+    mittens harness:<name> --migrate
+        Move the harness's existing real-home data into its state directory.
+        Run once, with no sessions of the harness running.
 
-    mittens [service] --dangerously-skip-pawmissions [arguments...]
-        Inspect the service's real-home data, count down for 10 seconds, then
+    mittens harness:<name> --dangerously-skip-pawmissions [arguments...]
+        Inspect the harness's real-home data, count down for 10 seconds, then
         DELETE it (rm -rf) to clear the startup guard, and launch anyway.
         Destroys data; only for disposable leftovers of unwrapped runs.
 
 ## Caveats
 
 - Plain `claude`/`opencode` runs outside mittens will recreate their dotfiles
-  in the real home; mittens refuses to start while any of the service's
+  in the real home; mittens refuses to start while any of the harness's
   real-home paths exist, to prevent silent divergence between the two.
-  Consider aliasing `claude` to `mittens` and `opencode` to `mittens
-  opencode` in your shell (if you shadow the real opencode with a wrapper
-  named `opencode`, set `MITTENS_OPENCODE_BIN` so mittens does not resolve
-  the wrapper from PATH and recurse).
+  Consider aliasing `claude` to `mittens harness:claude` and `opencode` to
+  `mittens harness:opencode` in your shell (if you shadow the real opencode
+  with a wrapper named `opencode`, set `MITTENS_OPENCODE_BIN` so mittens does
+  not resolve the wrapper from PATH and recurse).
 - New top-level entries created under `$HOME` inside the namespace land on
   the tmpfs and vanish on exit. If a tool needs a new persistent
   `~/.something`, create it in the real home first; it will be bound in on
@@ -140,10 +140,10 @@ config *loading*; nothing relocates `~/.opencode` itself, so opencode refuses
 
 ## Environment
 
-    MITTENS_STATE_DIR      override the state directory of the invoked service
-                           (per-invocation — it applies to whichever service
+    MITTENS_STATE_DIR      override the state directory of the invoked harness
+                           (per-invocation — it applies to whichever harness
                            runs, so don't export it globally if you use more
-                           than one service)
+                           than one harness)
     MITTENS_CLAUDE_BIN     override the claude executable
                            (default: ~/.local/bin/claude)
     MITTENS_OPENCODE_BIN   override the opencode executable
