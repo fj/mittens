@@ -14,7 +14,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::util::which;
+use crate::util::{resolve_snap_shim, which};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Harness {
@@ -78,7 +78,17 @@ impl Harness {
     fn default_bin(self, home: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
         match self {
             Self::Claude => Some(home.join(".local/bin/claude")),
-            Self::Opencode => which("opencode", env),
+            // A PATH hit may be the snap dispatcher (/snap/bin/opencode ->
+            // /usr/bin/snap), whose snap-confine refuses to run inside the
+            // unprivileged user namespace; use the snap's real binary instead.
+            // MITTENS_SNAP_ROOT relocates /snap purely so tests can exercise
+            // this wiring (like MITTENS_DELAY_SECS).
+            Self::Opencode => which("opencode", env).map(|p| {
+                let root = env("MITTENS_SNAP_ROOT")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| "/snap".into());
+                resolve_snap_shim("opencode", &p, &root).unwrap_or(p)
+            }),
         }
     }
 
@@ -119,7 +129,22 @@ impl Harness {
             // ~/.config/opencode — already visible inside the namespace.
             // Share pieces of ~/.config/agents into it with plain symlinks
             // instead; no mount wiring needed.
-            Self::Opencode => Ok(Vec::new()),
+            Self::Opencode => {
+                let mut args: Vec<OsString> = Vec::new();
+                // The snap wrapper we bypass sets this (the squashfs the
+                // binary lives on is read-only, so self-update cannot work);
+                // preserve it when running the snap's binary directly. A
+                // plain prefix check rather than the dispatcher resolution:
+                // anything under /snap is on the read-only squashfs, however
+                // it was selected — an explicit MITTENS_OPENCODE_BIN
+                // included.
+                if ctx.bin.as_deref().is_some_and(|b| b.starts_with("/snap")) {
+                    args.push("--setenv".into());
+                    args.push("OPENCODE_DISABLE_AUTOUPDATE".into());
+                    args.push("1".into());
+                }
+                Ok(args)
+            }
         }
     }
 }
@@ -276,6 +301,57 @@ mod tests {
         let env = env_from(&[("HOME", "/h"), ("XDG_STATE_HOME", "/xdg-state")]);
         let c = Ctx::resolve_with(Harness::Claude, &env);
         assert_eq!(c.state, PathBuf::from("/xdg-state/claude-home"));
+    }
+
+    #[test]
+    fn opencode_path_hit_resolves_through_the_snap_dispatcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let executable = |path: &Path| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // PATH finds <bin>/opencode, a symlink to the snap dispatcher.
+        let dispatcher = tmp.path().join("usr-bin/snap");
+        executable(&dispatcher);
+        let path_dir = tmp.path().join("bin");
+        fs::create_dir_all(&path_dir).unwrap();
+        std::os::unix::fs::symlink(&dispatcher, path_dir.join("opencode")).unwrap();
+        let snap_root = tmp.path().join("snap");
+        let real = snap_root.join("opencode/current/bin/opencode");
+        executable(&real);
+
+        let pairs = [
+            ("HOME", "/h"),
+            ("PATH", path_dir.to_str().unwrap()),
+            ("MITTENS_SNAP_ROOT", snap_root.to_str().unwrap()),
+        ];
+        let env = env_from(&pairs);
+        let ctx = Ctx::resolve_with(Harness::Opencode, &env);
+        assert_eq!(ctx.bin, Some(real.clone()));
+
+        // A PATH hit that is not the dispatcher passes through untouched.
+        let plain = tmp.path().join("plain/opencode");
+        executable(&plain);
+        let pairs = [
+            ("HOME", "/h"),
+            ("PATH", plain.parent().unwrap().to_str().unwrap()),
+            ("MITTENS_SNAP_ROOT", snap_root.to_str().unwrap()),
+        ];
+        let env = env_from(&pairs);
+        assert_eq!(Ctx::resolve_with(Harness::Opencode, &env).bin, Some(plain.clone()));
+
+        // An explicit override is used verbatim, dispatcher or not.
+        let pairs = [
+            ("HOME", "/h"),
+            ("PATH", path_dir.to_str().unwrap()),
+            ("MITTENS_SNAP_ROOT", snap_root.to_str().unwrap()),
+            ("MITTENS_OPENCODE_BIN", "/snap/bin/opencode"),
+        ];
+        let env = env_from(&pairs);
+        let ctx = Ctx::resolve_with(Harness::Opencode, &env);
+        assert_eq!(ctx.bin, Some(PathBuf::from("/snap/bin/opencode")));
     }
 
     #[test]

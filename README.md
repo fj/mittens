@@ -85,6 +85,17 @@ the real, XDG-proper `~/.config/opencode`, which is visible unmodified inside
 the namespace — share pieces of `~/.config/agents` into it with plain
 symlinks, no sandbox required.
 
+When opencode is installed as a snap, the `opencode` on PATH is really the
+snap dispatcher (`/snap/bin/opencode -> /usr/bin/snap`), which re-execs
+through snap-confine — and snap-confine refuses to run inside mittens'
+unprivileged user namespace ("snap-confine has elevated permissions and is
+not confined but should be"). mittens detects the dispatcher and execs the
+snap's real binary (`/snap/opencode/current/bin/opencode`) directly instead,
+with `OPENCODE_DISABLE_AUTOUPDATE=1` set as the snap packaging would have (the
+snap's squashfs is read-only, so self-update cannot work). An explicit
+`MITTENS_OPENCODE_BIN` is used verbatim, without this resolution — though a
+binary under `/snap` still gets the autoupdate opt-out.
+
 ## Escape hatch
 
 `mittens harness:<name> --unsafe` skips bubblewrap and just execs the tool with an

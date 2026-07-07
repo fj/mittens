@@ -258,6 +258,22 @@ mod tests {
     }
 
     #[test]
+    fn opencode_snap_binary_disables_autoupdate() {
+        let (_tmp, mut ctx) = scratch_ctx(Harness::Opencode);
+        // A non-snap binary gets no extra environment.
+        let args = strs(&bwrap_args(&ctx, true).unwrap());
+        assert!(!args.contains(&"OPENCODE_DISABLE_AUTOUPDATE".to_string()));
+
+        // The snap's squashfs is read-only, so self-update can never work;
+        // the setenv the bypassed snap wrapper would have set is preserved.
+        ctx.bin = Some(PathBuf::from("/snap/opencode/current/bin/opencode"));
+        let args = strs(&bwrap_args(&ctx, true).unwrap());
+        assert!(args.windows(3).any(|w| w[0] == "--setenv"
+            && w[1] == "OPENCODE_DISABLE_AUTOUPDATE"
+            && w[2] == "1"));
+    }
+
+    #[test]
     fn missing_user_ssh_config_falls_back_to_dev_null() {
         let (_tmp, ctx) = scratch_ctx(Harness::Claude);
         fs::remove_file(ctx.home.join(".ssh/config")).unwrap();

@@ -21,6 +21,23 @@ pub fn which(name: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathB
         .find(|candidate| is_executable(candidate))
 }
 
+/// Resolve a PATH hit that is really the snap dispatcher (`/snap/bin/<name>`
+/// is a symlink to `/usr/bin/snap`) to the app's real binary inside the
+/// mounted snap, `<snap_root>/<name>/current/bin/<name>`. The dispatcher
+/// re-execs through snap-confine, which is setuid and refuses to run inside
+/// an unprivileged user namespace ("snap-confine has elevated permissions and
+/// is not confined but should be") — so it can never work under bwrap.
+/// Classic snaps are plain binaries that run fine when exec'd directly. None
+/// if `found` is not the dispatcher or the snap has no such binary.
+pub fn resolve_snap_shim(name: &str, found: &Path, snap_root: &Path) -> Option<PathBuf> {
+    let target = fs::canonicalize(found).ok()?;
+    if target.file_name() != Some(OsStr::new("snap")) {
+        return None;
+    }
+    let real = snap_root.join(name).join("current/bin").join(name);
+    is_executable(&real).then_some(real)
+}
+
 /// True if the file name begins with `prefix`, byte-wise — the one
 /// definition of how "~/.claude.json*"-style globs match, shared by the
 /// guard, the bind-back skip, the wipe, migrate, and the sync-out so they
@@ -92,6 +109,31 @@ mod tests {
     fn shell_quote_escapes_single_quotes() {
         assert_eq!(shell_quote(Path::new("/a/b")), "'/a/b'");
         assert_eq!(shell_quote(Path::new("/a'b")), r"'/a'\''b'");
+    }
+
+    #[test]
+    fn snap_shim_resolves_to_the_snap_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = tmp.path().join("usr-bin/snap");
+        fs::create_dir_all(dispatcher.parent().unwrap()).unwrap();
+        fs::write(&dispatcher, "").unwrap();
+        let shim = tmp.path().join("bin/opencode");
+        fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&dispatcher, &shim).unwrap();
+        let snap_root = tmp.path().join("snap");
+        let real = snap_root.join("opencode/current/bin/opencode");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, "").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(resolve_snap_shim("opencode", &shim, &snap_root), Some(real.clone()));
+
+        // A non-dispatcher hit passes through untouched.
+        assert_eq!(resolve_snap_shim("opencode", &real, &snap_root), None);
+
+        // A dispatcher whose snap lacks the expected binary resolves to None.
+        fs::remove_file(&real).unwrap();
+        assert_eq!(resolve_snap_shim("opencode", &shim, &snap_root), None);
     }
 
     #[test]
