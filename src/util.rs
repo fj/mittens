@@ -21,17 +21,26 @@ pub fn which(name: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathB
         .find(|candidate| is_executable(candidate))
 }
 
-/// Resolve a PATH hit that is really the snap dispatcher (`/snap/bin/<name>`
-/// is a symlink to `/usr/bin/snap`) to the app's real binary inside the
-/// mounted snap, `<snap_root>/<name>/current/bin/<name>`. The dispatcher
-/// re-execs through snap-confine, which is setuid and refuses to run inside
-/// an unprivileged user namespace ("snap-confine has elevated permissions and
-/// is not confined but should be") — so it can never work under bwrap.
-/// Classic snaps are plain binaries that run fine when exec'd directly. None
-/// if `found` is not the dispatcher or the snap has no such binary.
+/// True if `path` ultimately resolves to the snap dispatcher binary (every
+/// `/snap/bin` entry is a symlink chain ending at `/usr/bin/snap`). The
+/// dispatcher re-execs through snap-confine, which is setuid and refuses to
+/// run inside an unprivileged user namespace ("snap-confine has elevated
+/// permissions and is not confined but should be") — so it can never work
+/// under bwrap.
+pub fn is_snap_dispatcher(path: &Path) -> bool {
+    fs::canonicalize(path).ok().as_deref().and_then(Path::file_name) == Some(OsStr::new("snap"))
+}
+
+/// Resolve a PATH hit that is really the snap dispatcher to the app's real
+/// binary inside the mounted snap, `<snap_root>/<name>/current/bin/<name>`.
+/// Classic snaps' binaries run fine when exec'd directly. None if `found` is
+/// not the dispatcher or the snap has no such binary. Deliberately NOT the
+/// snap.yaml `command:` resolution src/snap.rs uses for the in-sandbox
+/// /snap/bin shims: that command is often a launcher script that dereferences
+/// `$SNAP`, which is only set when exec'd through those shims — the harness
+/// binary is exec'd bare, so it must be the real executable itself.
 pub fn resolve_snap_shim(name: &str, found: &Path, snap_root: &Path) -> Option<PathBuf> {
-    let target = fs::canonicalize(found).ok()?;
-    if target.file_name() != Some(OsStr::new("snap")) {
+    if !is_snap_dispatcher(found) {
         return None;
     }
     let real = snap_root.join(name).join("current/bin").join(name);

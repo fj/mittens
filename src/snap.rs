@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::util::is_executable;
+use crate::util::{is_executable, is_snap_dispatcher};
 
 /// Bwrap arguments overmounting `<snap_root>/bin` with the generated shim
 /// directory, refreshed under `<state>/snap-bin` as a side effect. Empty when
@@ -101,8 +101,7 @@ fn resolve_entry(snap_bin: &Path, name: &OsStr, snap_root: &Path) -> Option<Shim
     };
     // Only dispatcher entries are rewritten; a hand-placed or dangling
     // symlink is replicated as-is.
-    let canon = fs::canonicalize(&path).ok();
-    if canon.as_deref().and_then(Path::file_name) != Some(OsStr::new("snap")) {
+    if !is_snap_dispatcher(&path) {
         return Some(Shim::Symlink(target));
     }
     // snapd names dispatcher entries `<snap>.<app>` (just `<snap>` when the
@@ -318,6 +317,7 @@ apps:
     environment:
       TOFU_FLAVOR: 'firm'
       PATH: $SNAP/bin:$PATH
+      not-an-identifier: skipped
     aliases:
       - tofu
 confinement: classic
@@ -337,8 +337,20 @@ grade: stable
             vec![
                 ("TOFU_FLAVOR".to_string(), "firm".to_string()),
                 ("PATH".to_string(), "$SNAP/bin:$PATH".to_string()),
+                ("not-an-identifier".to_string(), "skipped".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn description_text_cannot_upgrade_a_strict_snap_to_classic() {
+        // The dangerous inverse of the CLASSIC_YAML decoy: free text in a
+        // block scalar claiming classic confinement must not make a strict
+        // snap eligible for wrappers.
+        let meta = parse_snap_yaml(
+            "name: locked\nconfinement: strict\ndescription: |\n  confinement: classic\napps:\n  locked:\n    command: locked\n",
+        );
+        assert_eq!(meta.confinement.as_deref(), Some("strict"));
     }
 
     #[test]
@@ -436,12 +448,42 @@ grade: stable
             assert!(script.contains("export SNAP_REVISION=\"252\"\n"));
             assert!(script.contains("export TOFU_FLAVOR=\"firm\"\n"));
             assert!(script.contains("export PATH=\"$SNAP/bin:$PATH\"\n"));
+            // Keys that are not sh identifiers cannot be exported.
+            assert!(!script.contains("not-an-identifier"), "{script}");
             assert!(script.ends_with("exec \"$SNAP/tofu\" \"$@\"\n"), "{script}");
             assert!(is_executable(&shim_dir.join(name)));
         }
 
         // The strict snap's dispatcher symlink is replicated verbatim.
         assert_eq!(fs::read_link(shim_dir.join("strictly")).unwrap(), snaps.dispatcher());
+    }
+
+    #[test]
+    fn non_dispatcher_entries_are_replicated_or_copied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snaps = FakeSnaps::new(tmp.path());
+        // A wrapper must resolve for the overmount to happen at all.
+        snaps.snap("opentofu", "252", CLASSIC_YAML, &["tofu"]);
+        snaps.entry("opentofu.tofu");
+        let bin = tmp.path().join("bin");
+        // Hand-placed symlink past the dispatcher, a dangling symlink, and a
+        // plain executable sitting directly in the snap bin directory.
+        std::os::unix::fs::symlink("/bin/true", bin.join("hand-placed")).unwrap();
+        std::os::unix::fs::symlink("/nonexistent-target", bin.join("dangling")).unwrap();
+        fs::write(bin.join("plain"), "#!/bin/sh\necho plain\n").unwrap();
+        fs::set_permissions(bin.join("plain"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let state = tmp.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        assert!(!shim_args(&state, tmp.path()).unwrap().is_empty());
+        let shim_dir = state.join("snap-bin");
+        assert_eq!(fs::read_link(shim_dir.join("hand-placed")).unwrap(), Path::new("/bin/true"));
+        assert_eq!(
+            fs::read_link(shim_dir.join("dangling")).unwrap(),
+            Path::new("/nonexistent-target")
+        );
+        assert_eq!(fs::read_to_string(shim_dir.join("plain")).unwrap(), "#!/bin/sh\necho plain\n");
+        assert!(is_executable(&shim_dir.join("plain")));
     }
 
     #[test]
