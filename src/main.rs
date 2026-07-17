@@ -13,6 +13,7 @@ mod engine;
 mod harness;
 mod inner;
 mod migrate;
+mod snap;
 mod util;
 mod wipe;
 

@@ -75,20 +75,19 @@ impl Harness {
         }
     }
 
-    fn default_bin(self, home: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    fn default_bin(
+        self,
+        home: &Path,
+        snap_root: &Path,
+        env: &dyn Fn(&str) -> Option<OsString>,
+    ) -> Option<PathBuf> {
         match self {
             Self::Claude => Some(home.join(".local/bin/claude")),
             // A PATH hit may be the snap dispatcher (/snap/bin/opencode ->
             // /usr/bin/snap), whose snap-confine refuses to run inside the
             // unprivileged user namespace; use the snap's real binary instead.
-            // MITTENS_SNAP_ROOT relocates /snap purely so tests can exercise
-            // this wiring (like MITTENS_DELAY_SECS).
-            Self::Opencode => which("opencode", env).map(|p| {
-                let root = env("MITTENS_SNAP_ROOT")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| "/snap".into());
-                resolve_snap_shim("opencode", &p, &root).unwrap_or(p)
-            }),
+            Self::Opencode => which("opencode", env)
+                .map(|p| resolve_snap_shim("opencode", &p, snap_root).unwrap_or(p)),
         }
     }
 
@@ -201,6 +200,10 @@ pub struct Ctx {
     pub bin: Option<PathBuf>,
     pub state: PathBuf,
     pub agents_cfg: PathBuf,
+    /// Where snapd mounts snaps (normally /snap). MITTENS_SNAP_ROOT relocates
+    /// it purely so tests can exercise the snap wiring (like
+    /// MITTENS_DELAY_SECS).
+    pub snap_root: PathBuf,
 }
 
 impl Ctx {
@@ -222,10 +225,12 @@ impl Ctx {
                 .unwrap_or_else(|| home.join(".config"))
                 .join("agents")
         });
+        let snap_root =
+            env("MITTENS_SNAP_ROOT").map(PathBuf::from).unwrap_or_else(|| "/snap".into());
         let bin = env(harness.bin_env())
             .map(PathBuf::from)
-            .or_else(|| harness.default_bin(&home, env));
-        Ctx { harness, home, bin, state, agents_cfg }
+            .or_else(|| harness.default_bin(&home, &snap_root, env));
+        Ctx { harness, home, bin, state, agents_cfg, snap_root }
     }
 
     /// `<state>/dot-<name>` — mounted over `~/.<name>` inside the namespace.

@@ -96,6 +96,29 @@ snap's squashfs is read-only, so self-update cannot work). An explicit
 `MITTENS_OPENCODE_BIN` is used verbatim, without this resolution — though a
 binary under `/snap` still gets the autoupdate opt-out.
 
+## Snap-packaged tools inside the sandbox
+
+The snap-confine refusal above hits every snap-installed tool the agent
+invokes *inside* the namespace, too — `tofu`, `uv`, `task`, whatever else
+`/snap/bin` holds — because each of those PATH entries is the same dispatcher.
+At launch, mittens generates a shim directory (`<state>/snap-bin`) and
+read-only bind-mounts it over `/snap/bin` inside the namespace:
+
+- For a classic-confined snap, the shim is a small `sh` wrapper that exports
+  the `SNAP*` variables `snap run` would have set (snaps' own launcher
+  scripts dereference `$SNAP`) plus the app's `environment:` from
+  `meta/snap.yaml`, then execs the snap's real command under
+  `/snap/<name>/current` directly. Classic commands are plain executables
+  that run fine without confinement, so behavior matches an unsandboxed run.
+- Everything else is replicated unchanged. Strictly confined snaps genuinely
+  need snap-confine's setuid-root privileges, which cannot exist inside an
+  unprivileged user namespace, so those keep failing with the honest
+  snap-confine error rather than something mittens invented.
+
+The shim directory is refreshed on every launch, entry by entry, so
+concurrently running sessions that have it mounted as their `/snap/bin` are
+never left with an empty directory.
+
 ## Escape hatch
 
 `mittens harness:<name> --unsafe` skips bubblewrap and just execs the tool with an

@@ -162,6 +162,12 @@ pub fn bwrap_args(ctx: &Ctx, git_ssh_command_set: bool) -> Result<Vec<OsString>>
         args.push(format!("ssh -F {}", shell_quote(&ssh_cfg)).into());
     }
 
+    // Snap-packaged tools invoked inside the namespace would hit the snap
+    // dispatcher, whose snap-confine can never run in an unprivileged user
+    // namespace; overmount /snap/bin with shims that exec classic snaps'
+    // commands directly (see src/snap.rs).
+    args.extend(crate::snap::shim_args(&ctx.state, &ctx.snap_root)?);
+
     args.extend(ctx.harness.extra_bwrap_args(ctx)?);
     Ok(args)
 }
@@ -195,6 +201,9 @@ mod tests {
             bin: Some(PathBuf::from("/bin/true")),
             state: tmp.path().join("state"),
             agents_cfg: tmp.path().join("agents"),
+            // Nonexistent: the snap shim wiring stays out of these tests'
+            // args (src/snap.rs has its own).
+            snap_root: tmp.path().join("snap-root"),
         };
         fs::create_dir_all(ctx.dot_state()).unwrap();
         (tmp, ctx)

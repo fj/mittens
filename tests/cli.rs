@@ -46,6 +46,9 @@ struct Harness {
     home: PathBuf,
     state: PathBuf,
     fake_bin: PathBuf,
+    // Stands in for /snap; not created, so runs are snap-free unless a test
+    // populates it.
+    snap_root: PathBuf,
 }
 
 impl Harness {
@@ -54,11 +57,12 @@ impl Harness {
         let home = tmp.path().join("home");
         let state = tmp.path().join("state");
         let fake_bin = tmp.path().join("fake-bin");
+        let snap_root = tmp.path().join("snap-root");
         fs::create_dir_all(home.join("docs")).unwrap();
         fs::create_dir_all(home.join(".ssh")).unwrap();
         fs::write(home.join(".ssh/config"), "Host *\n").unwrap();
         fs::create_dir_all(&fake_bin).unwrap();
-        let h = Harness { _tmp: tmp, home, state, fake_bin };
+        let h = Harness { _tmp: tmp, home, state, fake_bin, snap_root };
         h.script("bwrap", FAKE_BWRAP);
         h.script("claude", FAKE_CLAUDE);
         h.script("opencode", FAKE_OPENCODE);
@@ -85,6 +89,7 @@ impl Harness {
             .env("MITTENS_CLAUDE_BIN", self.fake_bin.join("claude"))
             .env("MITTENS_OPENCODE_BIN", self.fake_bin.join("opencode"))
             .env("MITTENS_AGENTS_DIR", self.home.join(".config/agents"))
+            .env("MITTENS_SNAP_ROOT", &self.snap_root)
             // Run the countdown/pause paths instantly.
             .env("MITTENS_DELAY_SECS", "0")
             .output()
@@ -465,4 +470,63 @@ fn missing_tool_binary_is_reported() {
     let out = h.mittens(&["harness:claude", "hello"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("claude binary not found at"));
+}
+
+#[test]
+fn classic_snap_commands_get_shims_over_snap_bin() {
+    let h = Harness::new();
+    // A fake snapd layout, opentofu-style: the command name (tofu) differs
+    // from the snap name, /snap/bin holds the qualified dispatcher entry plus
+    // a bare-name alias, and the real command lives at the snap root.
+    let bin = h.snap_root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let dispatcher = h.snap_root.join("usr-bin/snap");
+    fs::create_dir_all(dispatcher.parent().unwrap()).unwrap();
+    fs::write(&dispatcher, "").unwrap();
+    fs::set_permissions(&dispatcher, fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&dispatcher, bin.join("opentofu.tofu")).unwrap();
+    std::os::unix::fs::symlink("opentofu.tofu", bin.join("tofu")).unwrap();
+    let rev = h.snap_root.join("opentofu/252");
+    fs::create_dir_all(rev.join("meta")).unwrap();
+    fs::write(
+        rev.join("meta/snap.yaml"),
+        "name: opentofu\nconfinement: classic\napps:\n  tofu:\n    command: tofu\n    environment:\n      TOFU_FLAVOR: 'firm'\n",
+    )
+    .unwrap();
+    fs::write(
+        rev.join("tofu"),
+        "#!/bin/sh\necho \"REAL-TOFU args=$* SNAP=$SNAP name=$SNAP_NAME rev=$SNAP_REVISION flavor=$TOFU_FLAVOR\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(rev.join("tofu"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("252", h.snap_root.join("opentofu/current")).unwrap();
+    // A strictly confined snap stays a dispatcher symlink.
+    std::os::unix::fs::symlink(&dispatcher, bin.join("spotify")).unwrap();
+    let strict = h.snap_root.join("spotify/7");
+    fs::create_dir_all(strict.join("meta")).unwrap();
+    fs::write(strict.join("meta/snap.yaml"), "name: spotify\nconfinement: strict\n").unwrap();
+    std::os::unix::fs::symlink("7", h.snap_root.join("spotify/current")).unwrap();
+
+    let out = h.mittens(&["harness:claude", "hi"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    // The generated shim directory is overmounted onto the snap bin dir.
+    assert!(stdout(&out).contains(&format!(
+        "--ro-bind {}/snap-bin -> {}",
+        h.state.display(),
+        bin.display()
+    )));
+
+    // The alias's shim execs the snap's real command with the environment
+    // snap run would have provided.
+    let run = Command::new(h.state.join("snap-bin/tofu")).arg("plan").output().unwrap();
+    assert!(run.status.success(), "stderr: {}", stderr(&run));
+    assert_eq!(
+        stdout(&run),
+        format!(
+            "REAL-TOFU args=plan SNAP={}/opentofu/current name=opentofu rev=252 flavor=firm\n",
+            h.snap_root.display()
+        )
+    );
+    // The strict snap's entry replicated the dispatcher symlink.
+    assert_eq!(fs::read_link(h.state.join("snap-bin/spotify")).unwrap(), dispatcher);
 }
