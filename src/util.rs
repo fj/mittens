@@ -66,11 +66,6 @@ pub fn entries_with_prefix(dir: &Path, prefix: &str) -> std::io::Result<Vec<Path
     Ok(matches)
 }
 
-/// Quote for interpolation into a shell command line (like bash's ${var@Q}).
-pub fn shell_quote(path: &Path) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
-}
-
 /// Sleep for `secs`. MITTENS_DELAY_SECS overrides the duration (its only
 /// purpose is letting the test suite run the countdown paths instantly).
 pub fn pause(secs: u64) {
@@ -113,12 +108,6 @@ pub fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shell_quote_escapes_single_quotes() {
-        assert_eq!(shell_quote(Path::new("/a/b")), "'/a/b'");
-        assert_eq!(shell_quote(Path::new("/a'b")), r"'/a'\''b'");
-    }
 
     #[test]
     fn snap_shim_resolves_to_the_snap_binary() {

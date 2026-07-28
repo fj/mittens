@@ -204,6 +204,9 @@ pub struct Ctx {
     /// it purely so tests can exercise the snap wiring (like
     /// MITTENS_DELAY_SECS).
     pub snap_root: PathBuf,
+    /// Where the system-wide ssh client config lives (normally /etc/ssh).
+    /// MITTENS_ETC_SSH relocates it for the same test-only reason.
+    pub etc_ssh: PathBuf,
 }
 
 impl Ctx {
@@ -227,10 +230,12 @@ impl Ctx {
         });
         let snap_root =
             env("MITTENS_SNAP_ROOT").map(PathBuf::from).unwrap_or_else(|| "/snap".into());
+        let etc_ssh =
+            env("MITTENS_ETC_SSH").map(PathBuf::from).unwrap_or_else(|| "/etc/ssh".into());
         let bin = env(harness.bin_env())
             .map(PathBuf::from)
             .or_else(|| harness.default_bin(&home, &snap_root, env));
-        Ctx { harness, home, bin, state, agents_cfg, snap_root }
+        Ctx { harness, home, bin, state, agents_cfg, snap_root, etc_ssh }
     }
 
     /// `<state>/dot-<name>` — mounted over `~/.<name>` inside the namespace.
@@ -281,6 +286,10 @@ mod tests {
         assert_eq!(c.sync_state(), Some(PathBuf::from("/h/.local/state/claude-home/claude.json")));
         assert_eq!(c.bin, Some(PathBuf::from("/h/.local/bin/claude")));
         assert_eq!(c.agents_cfg, PathBuf::from("/h/.config/agents"));
+        // The host paths every test overrides, so a typo here would disable
+        // the snap and ssh wiring on real machines with a green suite.
+        assert_eq!(c.snap_root, PathBuf::from("/snap"));
+        assert_eq!(c.etc_ssh, PathBuf::from("/etc/ssh"));
 
         let o = Ctx::resolve_with(Harness::Opencode, &env);
         assert_eq!(o.state, PathBuf::from("/h/.local/state/opencode-home"));
@@ -296,12 +305,14 @@ mod tests {
             ("MITTENS_STATE_DIR", "/elsewhere"),
             ("MITTENS_CLAUDE_BIN", "/opt/claude"),
             ("MITTENS_AGENTS_DIR", "/cfg/agents"),
+            ("MITTENS_ETC_SSH", "/cfg/etc-ssh"),
             ("XDG_STATE_HOME", "/xdg-state"),
         ]);
         let c = Ctx::resolve_with(Harness::Claude, &env);
         assert_eq!(c.state, PathBuf::from("/elsewhere"));
         assert_eq!(c.bin, Some(PathBuf::from("/opt/claude")));
         assert_eq!(c.agents_cfg, PathBuf::from("/cfg/agents"));
+        assert_eq!(c.etc_ssh, PathBuf::from("/cfg/etc-ssh"));
 
         let env = env_from(&[("HOME", "/h"), ("XDG_STATE_HOME", "/xdg-state")]);
         let c = Ctx::resolve_with(Harness::Claude, &env);

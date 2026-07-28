@@ -11,7 +11,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::harness::Ctx;
-use crate::util::{entries_with_prefix, is_executable, name_starts_with, shell_quote, which};
+use crate::util::{entries_with_prefix, is_executable, name_starts_with, which};
 use crate::wipe;
 
 pub enum Mode {
@@ -53,7 +53,7 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
             .with_context(|| format!("creating {}", sync_state.display()))?;
     }
 
-    let bwrap = bwrap_args(ctx, env("GIT_SSH_COMMAND").is_some())?;
+    let bwrap = bwrap_args(ctx)?;
 
     // After a --dangerously-skip-pawmissions wipe, pause briefly before
     // launching.
@@ -123,7 +123,9 @@ fn stray_paths(ctx: &Ctx) -> Result<Vec<String>> {
 /// Build the namespace: tmpfs over $HOME, every real top-level entry bound
 /// back, state dir mounted at the tool's dot-directory. Sources are resolved
 /// on the host side, so they remain visible after the tmpfs covers $HOME.
-pub fn bwrap_args(ctx: &Ctx, git_ssh_command_set: bool) -> Result<Vec<OsString>> {
+/// Not pure: the wiring below materializes what it mounts (snap shims, ssh
+/// config replicas, agent-config mountpoints) under `<state>` on the way.
+pub fn bwrap_args(ctx: &Ctx) -> Result<Vec<OsString>> {
     let mut args: Vec<OsString> =
         vec!["--dev-bind".into(), "/".into(), "/".into(), "--tmpfs".into(), ctx.home.clone().into()];
 
@@ -147,20 +149,11 @@ pub fn bwrap_args(ctx: &Ctx, git_ssh_command_set: bool) -> Result<Vec<OsString>>
     args.push(ctx.home_dot().into());
 
     // Root-owned files appear as nobody:nogroup inside the user namespace
-    // (only the current uid is mapped), which trips OpenSSH's config
-    // ownership check on the /etc/ssh/ssh_config.d drop-ins and aborts every
-    // ssh run ("Bad owner or permissions on …"). Point git's ssh transport at
-    // the user config alone (-F skips the system-wide config; /dev/null if
-    // there is no user config) so git keeps working. Deliberately narrow: a
-    // preexisting GIT_SSH_COMMAND wins, and non-git ssh is left alone rather
-    // than papered over sandbox-wide.
-    if !git_ssh_command_set {
-        let ssh_cfg = ctx.home.join(".ssh/config");
-        let ssh_cfg = if ssh_cfg.is_file() { ssh_cfg } else { "/dev/null".into() };
-        args.push("--setenv".into());
-        args.push("GIT_SSH_COMMAND".into());
-        args.push(format!("ssh -F {}", shell_quote(&ssh_cfg)).into());
-    }
+    // (only the current uid is mapped), which trips OpenSSH's ownership check
+    // on the drop-ins the system-wide config includes and aborts every ssh run
+    // ("Bad owner or permissions on …"); overmount each included file with a
+    // replica owned by the invoking user (see src/ssh.rs).
+    args.extend(crate::ssh::config_args(&ctx.state, &ctx.etc_ssh)?);
 
     // Snap-packaged tools invoked inside the namespace would hit the snap
     // dispatcher, whose snap-confine can never run in an unprivileged user
@@ -204,6 +197,9 @@ mod tests {
             // Nonexistent: the snap shim wiring stays out of these tests'
             // args (src/snap.rs has its own).
             snap_root: tmp.path().join("snap-root"),
+            // Likewise for the ssh config replicas (src/ssh.rs has its own);
+            // ssh_wiring_is_appended below opts back in.
+            etc_ssh: tmp.path().join("etc-ssh"),
         };
         fs::create_dir_all(ctx.dot_state()).unwrap();
         (tmp, ctx)
@@ -225,7 +221,7 @@ mod tests {
         fs::create_dir_all(ctx.agents_cfg.join("agents")).unwrap();
         fs::write(ctx.agents_cfg.join("AGENTS.md"), "# memory\n").unwrap();
 
-        let args = strs(&bwrap_args(&ctx, false).unwrap());
+        let args = strs(&bwrap_args(&ctx).unwrap());
         let home = ctx.home.display().to_string();
 
         assert_eq!(args[..5], ["--dev-bind", "/", "/", "--tmpfs", &home][..]);
@@ -247,7 +243,6 @@ mod tests {
         assert!(!args.iter().any(|a| a.ends_with("/.claude/skills")));
         // Empty CLAUDE.md mountpoint was created on the dot-claude bind.
         assert!(ctx.dot_state().join("CLAUDE.md").is_file());
-        assert!(args.iter().any(|a| a.starts_with("ssh -F ")));
     }
 
     #[test]
@@ -255,14 +250,14 @@ mod tests {
         let (_tmp, ctx) = scratch_ctx(Harness::Opencode);
         fs::create_dir_all(ctx.agents_cfg.join("agents")).unwrap();
 
-        let args = strs(&bwrap_args(&ctx, true).unwrap());
+        let args = strs(&bwrap_args(&ctx).unwrap());
         let home = ctx.home.display().to_string();
 
         assert!(args.windows(3).any(|w| w[0] == "--bind"
             && w[1] == ctx.dot_state().display().to_string()
             && w[2] == format!("{home}/.opencode")));
         assert!(!args.iter().any(|a| a.contains("CLAUDE.md") || a.contains("/agents")));
-        // Preexisting GIT_SSH_COMMAND wins: no --setenv.
+        // Nothing sets environment for a plain opencode binary.
         assert!(!args.contains(&"--setenv".to_string()));
     }
 
@@ -270,24 +265,41 @@ mod tests {
     fn opencode_snap_binary_disables_autoupdate() {
         let (_tmp, mut ctx) = scratch_ctx(Harness::Opencode);
         // A non-snap binary gets no extra environment.
-        let args = strs(&bwrap_args(&ctx, true).unwrap());
+        let args = strs(&bwrap_args(&ctx).unwrap());
         assert!(!args.contains(&"OPENCODE_DISABLE_AUTOUPDATE".to_string()));
 
         // The snap's squashfs is read-only, so self-update can never work;
         // the setenv the bypassed snap wrapper would have set is preserved.
         ctx.bin = Some(PathBuf::from("/snap/opencode/current/bin/opencode"));
-        let args = strs(&bwrap_args(&ctx, true).unwrap());
+        let args = strs(&bwrap_args(&ctx).unwrap());
         assert!(args.windows(3).any(|w| w[0] == "--setenv"
             && w[1] == "OPENCODE_DISABLE_AUTOUPDATE"
             && w[2] == "1"));
     }
 
     #[test]
-    fn missing_user_ssh_config_falls_back_to_dev_null() {
+    fn ssh_wiring_is_appended() {
         let (_tmp, ctx) = scratch_ctx(Harness::Claude);
-        fs::remove_file(ctx.home.join(".ssh/config")).unwrap();
-        let args = strs(&bwrap_args(&ctx, false).unwrap());
-        assert!(args.contains(&"ssh -F '/dev/null'".to_string()));
+        // No system-wide ssh config: nothing to replicate, nothing appended.
+        let args = strs(&bwrap_args(&ctx).unwrap());
+        assert!(!args.iter().any(|a| a.contains("ssh-config")));
+
+        // A drop-in the system config includes is overmounted with its
+        // replica; ssh perm-checks the original and would abort on its
+        // nobody:nogroup owner inside the namespace.
+        let drop_in = ctx.etc_ssh.join("ssh_config.d/20-proxy.conf");
+        fs::create_dir_all(drop_in.parent().unwrap()).unwrap();
+        fs::write(ctx.etc_ssh.join("ssh_config"), "Include ssh_config.d/*.conf\n").unwrap();
+        fs::write(&drop_in, "Host .host\n").unwrap();
+
+        let args = strs(&bwrap_args(&ctx).unwrap());
+        let replica = ctx.state.join("ssh-config").join(drop_in.strip_prefix("/").unwrap());
+        assert!(
+            args.windows(3).any(|w| w[0] == "--ro-bind"
+                && w[1] == replica.display().to_string()
+                && w[2] == drop_in.display().to_string()),
+            "{args:?}"
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod harness;
 mod inner;
 mod migrate;
 mod snap;
+mod ssh;
 mod util;
 mod wipe;
 

@@ -28,7 +28,6 @@ exec "$@"
 const FAKE_CLAUDE: &str = r#"#!/usr/bin/env bash
 echo "ARGS: $*"
 echo "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-unset}"
-echo "GIT_SSH_COMMAND=${GIT_SSH_COMMAND:-unset}"
 cat "$HOME/.claude.json" 2>/dev/null || echo "no claude.json"
 echo '{"rewritten":true}' > "$HOME/.claude.json.tmp"
 mv "$HOME/.claude.json.tmp" "$HOME/.claude.json"
@@ -49,6 +48,10 @@ struct Harness {
     // Stands in for /snap; not created, so runs are snap-free unless a test
     // populates it.
     snap_root: PathBuf,
+    // Stands in for /etc/ssh, so the host's real one never leaks into a test.
+    // Populated like a stock Debian install: a system config including a
+    // drop-in directory that holds one file.
+    etc_ssh: PathBuf,
 }
 
 impl Harness {
@@ -58,11 +61,15 @@ impl Harness {
         let state = tmp.path().join("state");
         let fake_bin = tmp.path().join("fake-bin");
         let snap_root = tmp.path().join("snap-root");
+        let etc_ssh = tmp.path().join("etc-ssh");
         fs::create_dir_all(home.join("docs")).unwrap();
         fs::create_dir_all(home.join(".ssh")).unwrap();
         fs::write(home.join(".ssh/config"), "Host *\n").unwrap();
         fs::create_dir_all(&fake_bin).unwrap();
-        let h = Harness { _tmp: tmp, home, state, fake_bin, snap_root };
+        fs::create_dir_all(etc_ssh.join("ssh_config.d")).unwrap();
+        fs::write(etc_ssh.join("ssh_config"), "Include ssh_config.d/*.conf\nHost *\n").unwrap();
+        fs::write(etc_ssh.join("ssh_config.d/20-proxy.conf"), "Host .host\n").unwrap();
+        let h = Harness { _tmp: tmp, home, state, fake_bin, snap_root, etc_ssh };
         h.script("bwrap", FAKE_BWRAP);
         h.script("claude", FAKE_CLAUDE);
         h.script("opencode", FAKE_OPENCODE);
@@ -90,6 +97,7 @@ impl Harness {
             .env("MITTENS_OPENCODE_BIN", self.fake_bin.join("opencode"))
             .env("MITTENS_AGENTS_DIR", self.home.join(".config/agents"))
             .env("MITTENS_SNAP_ROOT", &self.snap_root)
+            .env("MITTENS_ETC_SSH", &self.etc_ssh)
             // Run the countdown/pause paths instantly.
             .env("MITTENS_DELAY_SECS", "0")
             .output()
@@ -122,7 +130,7 @@ fn claude_wrapped_run_syncs_and_passes_args_through() {
     assert!(out.status.success(), "stderr: {}", stderr(&out));
 
     // Mount args: home entries bound back, dot-claude bound over ~/.claude,
-    // shared agent config wired, ssh workaround set.
+    // shared agent config wired, ssh drop-ins replaced by their replicas.
     let home = h.home.display().to_string();
     assert!(text.contains(&format!("--tmpfs {home}")));
     assert!(text.contains(&format!("--dev-bind {home}/docs -> {home}/docs")));
@@ -136,7 +144,18 @@ fn claude_wrapped_run_syncs_and_passes_args_through() {
     assert!(text.contains(&format!(
         "--ro-bind {home}/.config/agents/AGENTS.md -> {home}/.claude/CLAUDE.md"
     )));
-    assert!(text.contains("--setenv GIT_SSH_COMMAND=ssh -F "));
+    // The drop-in the system-wide ssh config includes is overmounted with a
+    // replica owned by the invoking user; the original is root-owned on a real
+    // system and OpenSSH aborts on its nobody:nogroup owner inside the
+    // namespace. The replica is byte-identical.
+    let drop_in = h.etc_ssh.join("ssh_config.d/20-proxy.conf");
+    let replica = h.state.join("ssh-config").join(drop_in.strip_prefix("/").unwrap());
+    assert!(text.contains(&format!("--ro-bind {} -> {}", replica.display(), drop_in.display())));
+    assert_eq!(fs::read_to_string(&replica).unwrap(), fs::read_to_string(&drop_in).unwrap());
+    // The system-wide file itself is read without an ownership check, so it is
+    // not overmounted (matched whole-line: it is a path prefix of the drop-in).
+    let system_config = format!("-> {}", h.etc_ssh.join("ssh_config").display());
+    assert!(!text.lines().any(|line| line.ends_with(&system_config)));
 
     // Passthrough of arbitrary args, including flag-looking ones.
     assert!(text.contains("ARGS: hello --flag config"));

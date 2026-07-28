@@ -54,6 +54,16 @@ The snap-confine refusal above hits every snap-installed tool the agent invokes 
 
 The shim directory is refreshed on every launch, entry by entry, so concurrently running sessions that have it mounted as their `/snap/bin` are never left with an empty directory.
 
+## ssh inside the sandbox
+
+Only the invoking uid is mapped in the sandbox's user namespace, so every root-owned file appears as `nobody:nogroup` inside it. OpenSSH perm-checks each file it pulls in through an `Include` directive — the owner must be root or the invoking user — so the stock `Include /etc/ssh/ssh_config.d/*.conf` in `/etc/ssh/ssh_config` aborts ssh at startup on any distribution shipping a drop-in there:
+
+    Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf
+
+That is fatal, not a warning, and it hits every ssh invocation inside the namespace: git over ssh, scp, rsync, `ProxyJump`, anything shelling out to ssh. The ownership cannot be repaired from within, since an unprivileged user namespace cannot map root. So at launch mittens walks the `Include` graph of the system-wide config, replicates each included file byte for byte under `<state>/ssh-config` (a mirror of its absolute path, and therefore owned by you), and read-only bind-mounts each replica over the original inside the namespace. What ssh reads is unchanged; only the owner it sees is.
+
+`/etc/ssh/ssh_config` itself is left alone — OpenSSH reads the system-wide file without the ownership check — as is any included file mittens cannot read, which then fails inside the sandbox exactly as it would outside. A config that includes nothing wires nothing. Replicas are refreshed on every launch and pruned when a drop-in goes away.
+
 ## Escape hatch
 
 `mittens harness:<name> --unsafe` skips bubblewrap and just execs the tool with an environment variable pointing at the state dir. Only claude supports it: Claude Code documents `CLAUDE_CONFIG_DIR` as relocating every `~/.claude` path, and it also moves the top-level config to `$CLAUDE_CONFIG_DIR/.claude.json` — a different location than the claude.json wrapped runs use, so the unsafe copy is seeded from claude.json once and evolves independently after that. The bind-mount wiring of the shared agent config is also absent in unsafe mode. Unlike the namespace, this depends entirely on Claude Code (and everything it spawns) honoring the environment variable — hence the name. opencode's `OPENCODE_CONFIG_DIR` only relocates config *loading*; nothing relocates `~/.opencode` itself, so opencode refuses `--unsafe`.
@@ -73,7 +83,7 @@ The shim directory is refreshed on every launch, entry by entry, so concurrently
 
 - Plain `claude`/`opencode` runs outside mittens will recreate their dotfiles in the real home; mittens refuses to start while any of the harness's real-home paths exist, to prevent silent divergence between the two. Consider aliasing `claude` to `mittens harness:claude` and `opencode` to `mittens harness:opencode` in your shell (if you shadow the real opencode with a wrapper named `opencode`, set `MITTENS_OPENCODE_BIN` so mittens does not resolve the wrapper from PATH and recurse).
 - New top-level entries created under `$HOME` inside the namespace land on the tmpfs and vanish on exit. If a tool needs a new persistent `~/.something`, create it in the real home first; it will be bound in on the next launch.
-- Only the current uid is mapped in the sandbox's user namespace, so files owned by anyone else (root included) appear as nobody:nogroup inside it. OpenSSH's config ownership check rejects the root-owned drop-ins in /etc/ssh/ssh_config.d on that basis ("Bad owner or permissions") and aborts every ssh invocation. mittens sets `GIT_SSH_COMMAND` to `ssh -F ~/.ssh/config` (or `-F /dev/null` if you have no user config; skipped entirely if `GIT_SSH_COMMAND` is already set) so git's ssh transport never reads the system-wide config. Other ssh use inside the sandbox stays broken; pass `-F` yourself.
+- Only the current uid is mapped in the sandbox's user namespace, so files owned by anyone else (root included) appear as nobody:nogroup inside it. ssh is repaired specifically (see above); any other tool that insists on an ownership of its own config is subject to the same problem.
 - Tools' own bwrap-based sandboxing cannot start nested inside mittens under Debian's stock AppArmor policy: the stacked bwrap//&unpriv_bwrap profile denies creating a nested mount namespace. Fixable with a custom AppArmor profile for a private copy of bwrap.
 
 ## Environment
