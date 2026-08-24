@@ -441,6 +441,37 @@ fn inner_rejects_malformed_argv() {
 }
 
 #[test]
+fn claude_unsafe_cleans_up_stray_home_data_after_run() {
+    let h = Harness::new();
+    fs::create_dir_all(&h.state).unwrap();
+
+    let out = h.mittens(&["harness:claude", "--unsafe", "hi"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    // The fake claude stub writes ~/.claude.json* to the real home; mittens
+    // must clean them up so the next run passes the startup guard.
+    assert!(!h.home.join(".claude.json").exists(), "~/.claude.json not cleaned up");
+    assert!(!h.home.join(".claude.json.backup").exists(), "~/.claude.json.backup not cleaned up");
+}
+
+#[test]
+fn claude_unsafe_signal_death_maps_to_128_plus_signal_and_still_cleans_up() {
+    let h = Harness::new();
+    fs::create_dir_all(&h.state).unwrap();
+    h.script(
+        "claude",
+        r#"#!/usr/bin/env bash
+echo '{"partial":true}' > "$HOME/.claude.json.tmp"
+mv "$HOME/.claude.json.tmp" "$HOME/.claude.json"
+kill -TERM $$
+"#,
+    );
+    let out = h.mittens(&["harness:claude", "--unsafe", "hello"]);
+    assert_eq!(out.status.code(), Some(128 + 15));
+    // cleanup_after_unsafe still ran after the signal death.
+    assert!(!h.home.join(".claude.json").exists(), "~/.claude.json not cleaned up after signal");
+}
+
+#[test]
 fn claude_unsafe_does_not_reseed_on_later_runs() {
     let h = Harness::new();
     fs::create_dir_all(&h.state).unwrap();
@@ -448,12 +479,9 @@ fn claude_unsafe_does_not_reseed_on_later_runs() {
 
     let out = h.mittens(&["harness:claude", "--unsafe", "first"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
-    // Unsandboxed, the stub wrote real ~/.claude.json* — clear them so the
-    // second run passes the guard (a real unsafe claude writes to
-    // CLAUDE_CONFIG_DIR instead).
-    for stray in [".claude.json", ".claude.json.backup"] {
-        let _ = fs::remove_file(h.home.join(stray));
-    }
+    // Stray ~/.claude.json* are cleaned up automatically after the run; the
+    // second invocation finds a clean home and passes the guard without any
+    // manual intervention.
 
     // The unsafe copy evolves independently after the one-time seeding.
     fs::write(h.state.join("dot-claude/.claude.json"), "{\"diverged\":1}").unwrap();
