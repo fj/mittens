@@ -302,7 +302,12 @@ fn opencode_unsafe_is_refused() {
     let h = Harness::new();
     let out = h.mittens(&["harness:opencode", "--unsafe"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("--unsafe is not supported for opencode"));
+    // The reason, not just the refusal: it is what tells the user no
+    // environment variable can stand in for the sandbox here.
+    assert!(stderr(&out).contains(
+        "--unsafe is not supported for opencode: OPENCODE_CONFIG_DIR only \
+         relocates config loading, nothing relocates ~/.opencode itself"
+    ));
 }
 
 #[test]
@@ -453,6 +458,33 @@ fn claude_unsafe_cleans_up_stray_home_data_after_run() {
     // must clean them up so the next run passes the startup guard.
     assert!(!h.home.join(".claude.json").exists(), "~/.claude.json not cleaned up");
     assert!(!h.home.join(".claude.json.backup").exists(), "~/.claude.json.backup not cleaned up");
+}
+
+#[test]
+fn claude_unsafe_cleanup_removes_the_dot_dir_and_spares_lookalikes() {
+    let h = Harness::new();
+    fs::create_dir_all(&h.state).unwrap();
+    // A tool that recreates its hardcoded dot directory despite the relocation
+    // variable: the cleanup must take the directory, not just the sync files.
+    h.script(
+        "claude",
+        r#"#!/usr/bin/env bash
+mkdir -p "$HOME/.claude/projects"
+echo '{}' > "$HOME/.claude/projects/session.json"
+echo '{}' > "$HOME/.claude.json"
+"#,
+    );
+    // Real-home entries that merely look similar must survive: the cleanup
+    // matches the dot dir exactly and the sync file by prefix, nothing else.
+    fs::write(h.home.join(".claude-notes.md"), "keep me").unwrap();
+    fs::create_dir_all(h.home.join(".claude-backups")).unwrap();
+
+    let out = h.mittens(&["harness:claude", "--unsafe", "hi"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(!h.home.join(".claude").exists(), "~/.claude not cleaned up");
+    assert!(!h.home.join(".claude.json").exists(), "~/.claude.json not cleaned up");
+    assert_eq!(fs::read_to_string(h.home.join(".claude-notes.md")).unwrap(), "keep me");
+    assert!(h.home.join(".claude-backups").is_dir(), "~/.claude-backups was deleted");
 }
 
 #[test]

@@ -14,7 +14,7 @@ Because the redirect happens at the kernel VFS layer, it applies to the tool and
 
 ## Harnesses
 
-Everything tool-specific lives in a harness handler (`src/harness.rs`). The first argument selects the harness as `harness:<name>`; there is no default, and mittens refuses to run without an explicit harness:
+Everything tool-specific lives in one file per harness under `src/harnesses/`. Each one implements the `HarnessSpec` interface, and `Harness::ALL` is the only list of the harnesses mittens knows about, so a new tool means a new file and one entry there. The first argument selects the harness as `harness:<name>`; there is no default, and mittens refuses to run without an explicit harness:
 
     mittens harness:claude [claude arguments...]      # Claude Code
     mittens harness:opencode [opencode arguments...]  # opencode
