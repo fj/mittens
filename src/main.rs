@@ -37,6 +37,12 @@ fn main() {
             print!("{}", usage(None));
             return;
         }
+        Some("self-update") => {
+            if args.len() > 1 {
+                fail(anyhow::anyhow!("self-update takes no arguments"));
+            }
+            self_update()
+        }
         Some(arg) if arg.starts_with(HARNESS_PREFIX) => {
             let name = &arg[HARNESS_PREFIX.len()..];
             match Harness::from_name(name) {
@@ -94,6 +100,29 @@ fn main() {
     fail(err);
 }
 
+/// Rebuild and reinstall the binary from the upstream repository via `cargo
+/// install`. When the running binary sits in a cargo-style `<root>/bin`
+/// directory, the new one is installed over it; otherwise cargo's default
+/// install root applies.
+fn self_update() -> ! {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args([
+        "install",
+        "--locked",
+        "--force",
+        "--git",
+        env!("CARGO_PKG_REPOSITORY"),
+        env!("CARGO_PKG_NAME"),
+    ]);
+    let exe = std::env::current_exe().ok();
+    if let Some(root) = exe.as_deref().and_then(util::cargo_install_root) {
+        cmd.arg("--root").arg(root);
+    }
+    let err = cmd.exec();
+    fail(anyhow::Error::new(err).context("exec cargo install (is cargo installed?)"));
+}
+
 fn fail(err: anyhow::Error) -> ! {
     eprintln!("mittens: {err:#}");
     std::process::exit(1);
@@ -132,15 +161,21 @@ Usage:
                                   startup guard, and launch anyway. Destroys
                                   data. Only use when you are certain the
                                   real-home copy is disposable leftover.
+  mittens self-update             rebuild and reinstall the binary from
+                                  {repository} via
+                                  cargo install, over the running binary's
+                                  own install root
   mittens --help | -h             show this help
 
-harness:<name> is only recognized as the first argument; --migrate, --unsafe,
---dangerously-skip-pawmissions, --help, and -h only directly after it.
+harness:<name> and self-update are only recognized as the first argument;
+--migrate, --unsafe, --dangerously-skip-pawmissions, --help, and -h only
+directly after harness:<name>.
 Everything else is passed through to the tool unchanged (so "mittens
 harness:claude config get theme" etc. work as expected; for the tool's own
 help, run "mittens harness:<name> help").
 "#,
         known = Harness::known(),
+        repository = env!("CARGO_PKG_REPOSITORY"),
     );
     let Some(ctx) = ctx else {
         return format!(

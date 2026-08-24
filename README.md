@@ -2,18 +2,25 @@
 
 Run coding agents with clean paws.
 
-Some coding agents litter the real home directory with hardcoded dotfiles instead of following the [XDG Base Directory spec](https://specifications.freedesktop.org/basedir-spec/latest/). mittens runs the agent inside a private mount namespace (via [bubblewrap](https://github.com/containers/bubblewrap)) where those paths are redirected to an XDG-compliant state directory, so the real home directory stays free of tool cruft.
+Some coding agents litter the real home directory with hardcoded dotfiles instead of following the [XDG Base Directory spec](https://specifications.freedesktop.org/basedir-spec/latest/). These agents have also refused to implement this specification for various reasons.
+
+`mittens` runs agents inside a private mount namespace via [bubblewrap](https://github.com/containers/bubblewrap). Those paths are redirected to an XDG-compliant state directory, so the real home directory stays free of tool cruft.
 
 ## How it works
 
-Inside the namespace, `$HOME` is replaced with a throwaway tmpfs, every real top-level entry of the home directory is bind-mounted back into place, and the state directory is mounted over the tool's hardcoded dot-directory. The mount point is created on the tmpfs, never on disk. Because the redirect happens at the kernel VFS layer, it applies to the tool and every subprocess it spawns (shell tools, MCP servers, hooks) — even for hardcoded path references — and does not depend on the tool honoring any environment variable, now or in future versions.
+Inside the namespace, `$HOME` is replaced with a throwaway tmpfs, every real top-level entry of the home directory is bind-mounted back into place, and the state directory is mounted over the tool's hardcoded dot-directory. The mount point is created on the tmpfs and never on disk.
+
+Because the redirect happens at the kernel VFS layer, it applies to the tool and every subprocess it spawns (shell tools, MCP servers, hooks). It does not depend on the tool honoring any environment variable, now or in future versions.
 
 ## Harnesses
 
-Everything tool-specific — the binary, which real-home paths to shadow, whether a top-level config file needs copy-sync, whether an unsandboxed fallback exists, and what extra mounts to wire — lives in a harness handler (`src/harness.rs`). The first argument selects the harness as `harness:<name>`; there is no default, and mittens refuses to run without an explicit harness:
+Everything tool-specific lives in a harness handler (`src/harness.rs`). The first argument selects the harness as `harness:<name>`; there is no default, and mittens refuses to run without an explicit harness:
 
     mittens harness:claude [claude arguments...]      # Claude Code
     mittens harness:opencode [opencode arguments...]  # opencode
+    ...
+
+This lets you alias `mittens harness:X` to `X` in your favorite shell so you don't have to type that each time.
 
 ### claude
 

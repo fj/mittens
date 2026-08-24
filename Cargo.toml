@@ -3,6 +3,7 @@ name = "mittens"
 version = "0.1.0"
 edition = "2024"
 description = "Run coding agents with clean paws: home-dir cruft redirected to XDG locations via bubblewrap"
+repository = "https://github.com/fj/mittens"
 
 [dependencies]
 anyhow = "1"

@@ -323,6 +323,8 @@ fn help_shows_harness_specific_values() {
     assert!(out.status.success());
     let text = stdout(&out);
     assert!(text.contains("mittens harness:<name> [arguments...]"));
+    assert!(text.contains("mittens self-update"));
+    assert!(text.contains("https://github.com/fj/mittens"));
     assert!(!text.contains("State directory:"));
 }
 
@@ -441,6 +443,37 @@ fn inner_rejects_malformed_argv() {
 }
 
 #[test]
+fn claude_unsafe_cleans_up_stray_home_data_after_run() {
+    let h = Harness::new();
+    fs::create_dir_all(&h.state).unwrap();
+
+    let out = h.mittens(&["harness:claude", "--unsafe", "hi"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    // The fake claude stub writes ~/.claude.json* to the real home; mittens
+    // must clean them up so the next run passes the startup guard.
+    assert!(!h.home.join(".claude.json").exists(), "~/.claude.json not cleaned up");
+    assert!(!h.home.join(".claude.json.backup").exists(), "~/.claude.json.backup not cleaned up");
+}
+
+#[test]
+fn claude_unsafe_signal_death_maps_to_128_plus_signal_and_still_cleans_up() {
+    let h = Harness::new();
+    fs::create_dir_all(&h.state).unwrap();
+    h.script(
+        "claude",
+        r#"#!/usr/bin/env bash
+echo '{"partial":true}' > "$HOME/.claude.json.tmp"
+mv "$HOME/.claude.json.tmp" "$HOME/.claude.json"
+kill -TERM $$
+"#,
+    );
+    let out = h.mittens(&["harness:claude", "--unsafe", "hello"]);
+    assert_eq!(out.status.code(), Some(128 + 15));
+    // cleanup_after_unsafe still ran after the signal death.
+    assert!(!h.home.join(".claude.json").exists(), "~/.claude.json not cleaned up after signal");
+}
+
+#[test]
 fn claude_unsafe_does_not_reseed_on_later_runs() {
     let h = Harness::new();
     fs::create_dir_all(&h.state).unwrap();
@@ -448,12 +481,9 @@ fn claude_unsafe_does_not_reseed_on_later_runs() {
 
     let out = h.mittens(&["harness:claude", "--unsafe", "first"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
-    // Unsandboxed, the stub wrote real ~/.claude.json* — clear them so the
-    // second run passes the guard (a real unsafe claude writes to
-    // CLAUDE_CONFIG_DIR instead).
-    for stray in [".claude.json", ".claude.json.backup"] {
-        let _ = fs::remove_file(h.home.join(stray));
-    }
+    // Stray ~/.claude.json* are cleaned up automatically after the run; the
+    // second invocation finds a clean home and passes the guard without any
+    // manual intervention.
 
     // The unsafe copy evolves independently after the one-time seeding.
     fs::write(h.state.join("dot-claude/.claude.json"), "{\"diverged\":1}").unwrap();
@@ -463,6 +493,80 @@ fn claude_unsafe_does_not_reseed_on_later_runs() {
         fs::read_to_string(h.state.join("dot-claude/.claude.json")).unwrap(),
         "{\"diverged\":1}"
     );
+}
+
+#[test]
+fn self_update_reinstalls_over_its_own_cargo_root() {
+    let h = Harness::new();
+    h.script("cargo", "#!/usr/bin/env bash\necho \"CARGO-ARGS: $*\"\n");
+    // Run a copy from a cargo-style <root>/bin layout, like `cargo install
+    // --root` produces: self-update must target that same root.
+    let root = h.home.join("tools");
+    fs::create_dir_all(root.join("bin")).unwrap();
+    let copy = root.join("bin/mittens");
+    // Copy in a child process: an in-process fs::copy holds a write fd that
+    // other tests' concurrently forked children can inherit, making the
+    // spawn below flake with ETXTBSY.
+    let cp = Command::new("cp").arg(env!("CARGO_BIN_EXE_mittens")).arg(&copy).status().unwrap();
+    assert!(cp.success());
+
+    let out = Command::new(&copy)
+        .arg("self-update")
+        .env_clear()
+        .env("HOME", &h.home)
+        .env("PATH", format!("{}:/usr/bin:/bin", h.fake_bin.display()))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains(
+        "CARGO-ARGS: install --locked --force --git https://github.com/fj/mittens mittens"
+    ));
+    assert!(text.contains(&format!("--root {}", root.display())));
+}
+
+#[test]
+fn self_update_outside_a_cargo_root_uses_the_default() {
+    let h = Harness::new();
+    h.script("cargo", "#!/usr/bin/env bash\necho \"CARGO-ARGS: $*\"\n");
+    // The test binary lives in target/debug, not a <root>/bin directory, so
+    // no --root is derived and cargo's own default applies.
+    let out = h.mittens(&["self-update"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains(
+        "CARGO-ARGS: install --locked --force --git https://github.com/fj/mittens mittens"
+    ));
+    assert!(!text.contains("--root"));
+}
+
+#[test]
+fn self_update_is_first_argument_only_and_takes_none() {
+    let h = Harness::new();
+    // After a harness selector it is an ordinary tool argument.
+    let out = h.mittens(&["harness:claude", "self-update"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("ARGS: self-update"));
+
+    // Trailing arguments are rejected rather than silently dropped.
+    let out = h.mittens(&["self-update", "--force"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("self-update takes no arguments"));
+}
+
+#[test]
+fn self_update_without_cargo_is_reported() {
+    let h = Harness::new();
+    // PATH must not include the real cargo's directory for this one.
+    let out = Command::new(env!("CARGO_BIN_EXE_mittens"))
+        .arg("self-update")
+        .env_clear()
+        .env("HOME", &h.home)
+        .env("PATH", &h.fake_bin)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("exec cargo install (is cargo installed?)"));
 }
 
 #[test]

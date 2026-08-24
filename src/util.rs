@@ -47,6 +47,17 @@ pub fn resolve_snap_shim(name: &str, found: &Path, snap_root: &Path) -> Option<P
     is_executable(&real).then_some(real)
 }
 
+/// The cargo install root that owns `exe`, if it sits in a cargo-style
+/// `<root>/bin` directory (`cargo install` always lays binaries out that
+/// way). None for a binary living anywhere else.
+pub fn cargo_install_root(exe: &Path) -> Option<&Path> {
+    let bin_dir = exe.parent()?;
+    if bin_dir.file_name() != Some(OsStr::new("bin")) {
+        return None;
+    }
+    bin_dir.parent()
+}
+
 /// True if the file name begins with `prefix`, byte-wise — the one
 /// definition of how "~/.claude.json*"-style globs match, shared by the
 /// guard, the bind-back skip, the wipe, migrate, and the sync-out so they
@@ -132,6 +143,16 @@ mod tests {
         // A dispatcher whose snap lacks the expected binary resolves to None.
         fs::remove_file(&real).unwrap();
         assert_eq!(resolve_snap_shim("opencode", &shim, &snap_root), None);
+    }
+
+    #[test]
+    fn cargo_install_root_requires_a_bin_parent() {
+        assert_eq!(
+            cargo_install_root(Path::new("/x/tools/bin/mittens")),
+            Some(Path::new("/x/tools"))
+        );
+        assert_eq!(cargo_install_root(Path::new("/x/target/debug/mittens")), None);
+        assert_eq!(cargo_install_root(Path::new("mittens")), None);
     }
 
     #[test]

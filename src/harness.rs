@@ -8,13 +8,13 @@
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::util::{resolve_snap_shim, which};
+use crate::util::{entries_with_prefix, resolve_snap_shim, which};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Harness {
@@ -107,11 +107,30 @@ impl Harness {
                     fs::copy(&wrapped, &seed)
                         .with_context(|| format!("seeding {}", seed.display()))?;
                 }
-                let err = Command::new(bin)
-                    .args(args)
-                    .env("CLAUDE_CONFIG_DIR", ctx.dot_state())
-                    .exec();
-                Err(err).with_context(|| format!("exec {}", bin.display()))
+                // Ignore SIGINT/SIGQUIT in the parent so Ctrl-C reaches the
+                // child but cleanup still runs after the child exits.
+                unsafe {
+                    libc::signal(libc::SIGINT, libc::SIG_IGN);
+                    libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+                }
+                let mut cmd = Command::new(bin);
+                cmd.args(args).env("CLAUDE_CONFIG_DIR", ctx.dot_state());
+                unsafe {
+                    cmd.pre_exec(|| {
+                        libc::signal(libc::SIGINT, libc::SIG_DFL);
+                        libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+                        Ok(())
+                    });
+                }
+                let status = cmd
+                    .spawn()
+                    .with_context(|| format!("exec {}", bin.display()))?
+                    .wait()
+                    .with_context(|| format!("waiting for {}", bin.display()))?;
+                cleanup_after_unsafe(ctx);
+                std::process::exit(
+                    status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
+                );
             }
             Self::Opencode => bail!(
                 "--unsafe is not supported for opencode: OPENCODE_CONFIG_DIR only \
@@ -190,6 +209,37 @@ fn claude_shared_agent_mounts(ctx: &Ctx) -> Result<Vec<OsString>> {
         args.push(ctx.home.join(".claude/CLAUDE.md").into());
     }
     Ok(args)
+}
+
+/// After a --unsafe run: silently remove any stray real-home paths so the
+/// startup guard passes cleanly on the next invocation. Errors are non-fatal
+/// warnings — the tool has already exited and we must not obscure its exit code.
+fn cleanup_after_unsafe(ctx: &Ctx) {
+    let mut paths = Vec::new();
+    if ctx.home_dot().symlink_metadata().is_ok() {
+        paths.push(ctx.home_dot());
+    }
+    if let Some(sync) = ctx.harness.sync_file() {
+        match entries_with_prefix(&ctx.home, sync) {
+            Ok(more) => paths.extend(more),
+            Err(err) => {
+                eprintln!("mittens: warning: could not enumerate cleanup targets: {err:#}");
+                return;
+            }
+        }
+    }
+    for path in paths {
+        let result = if path.is_dir() && !path.is_symlink() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if let Err(err) = result
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("mittens: warning: could not clean up {}: {err}", path.display());
+        }
+    }
 }
 
 /// Everything resolved once from the environment for the selected harness.
