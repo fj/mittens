@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::{Ctx, HarnessSpec, UnsafeSupport};
+use super::{Ctx, HarnessSpec, UnsafeSupport, agent_config};
 
 pub struct Claude;
 
@@ -61,51 +61,14 @@ impl HarnessSpec for Claude {
         Ok(())
     }
 
+    // Claude reads its global config from ~/.claude itself, and calls the
+    // memory file CLAUDE.md.
     fn extra_bwrap_args(&self, ctx: &Ctx) -> Result<Vec<OsString>> {
-        shared_agent_mounts(ctx)
+        agent_config::mounts(
+            ctx,
+            "",
+            &["agents", "commands", "skills", "hooks", "output-styles"],
+            "CLAUDE.md",
+        )
     }
-}
-
-/// Wire the shared, tool-agnostic agent config (XDG ~/.config/agents) into
-/// what Claude sees as ~/.claude, so authored config — subagents, commands,
-/// skills, hooks, output styles, and top-level memory — comes from one place
-/// shared across agent tools rather than from the per-tool state dir.
-/// Bind-mounted (not symlinked into dot-claude) so the wiring is explicit
-/// here and survives a wiped state dir: delete ~/.claude, run mittens, and
-/// these are reconstructed. Sources resolve host-side; mountpoints are
-/// ensured on the dot-claude bind so bwrap has somewhere to mount. Each is
-/// optional and mounted only if its source exists, so a name that does not
-/// exist yet costs nothing and starts working the moment you create it under
-/// the shared config. Machine-specific state (settings.json, plugins,
-/// projects, sessions, credentials, caches, …) is deliberately NOT shared and
-/// stays in dot-claude.
-fn shared_agent_mounts(ctx: &Ctx) -> Result<Vec<OsString>> {
-    let mut args: Vec<OsString> = Vec::new();
-    let dot_state = ctx.dot_state();
-    for d in ["agents", "commands", "skills", "hooks", "output-styles"] {
-        let src = ctx.agents_cfg.join(d);
-        if !src.is_dir() {
-            continue;
-        }
-        fs::create_dir_all(dot_state.join(d))
-            .with_context(|| format!("creating mountpoint {}", dot_state.join(d).display()))?;
-        args.push("--bind".into());
-        args.push(src.into());
-        args.push(ctx.home.join(".claude").join(d).into());
-    }
-    let agents_md = ctx.agents_cfg.join("AGENTS.md");
-    if agents_md.is_file() {
-        // CLAUDE.md is just AGENTS.md (the source of truth) under Claude's
-        // name, so mount it read-only: memory edits go to AGENTS.md directly,
-        // never diverge.
-        let mountpoint = dot_state.join("CLAUDE.md");
-        if !mountpoint.exists() {
-            fs::write(&mountpoint, "")
-                .with_context(|| format!("creating mountpoint {}", mountpoint.display()))?;
-        }
-        args.push("--ro-bind".into());
-        args.push(agents_md.into());
-        args.push(ctx.home.join(".claude/CLAUDE.md").into());
-    }
-    Ok(args)
 }

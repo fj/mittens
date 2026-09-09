@@ -7,7 +7,11 @@
 //!
 //! A harness is one file implementing HarnessSpec plus one entry in
 //! Harness::ALL, the only list of the harnesses mittens knows about.
+//! agent_config is the exception: wiring the shared agent config into a
+//! tool's global config directory is one policy, shared by the harnesses
+//! whose config directory the sandbox shadows.
 
+mod agent_config;
 mod claude;
 mod opencode;
 
