@@ -18,6 +18,7 @@ Everything tool-specific lives in one file per harness under `src/harnesses/`. E
 
     mittens harness:claude [claude arguments...]      # Claude Code
     mittens harness:opencode [opencode arguments...]  # opencode
+    mittens harness:pi [pi arguments...]              # pi
     ...
 
 This lets you alias `mittens harness:X` to `X` in your favorite shell so you don't have to type that each time.
@@ -52,6 +53,26 @@ opencode has no `~/.claude.json` analogue, so nothing is copy-synced. The shared
 
 When opencode is installed as a snap, the `opencode` on PATH is really the snap dispatcher (`/snap/bin/opencode -> /usr/bin/snap`), which re-execs through snap-confine — and snap-confine refuses to run inside mittens' unprivileged user namespace ("snap-confine has elevated permissions and is not confined but should be"). mittens detects the dispatcher and execs the snap's real binary (`/snap/opencode/current/bin/opencode`) directly instead, with `OPENCODE_DISABLE_AUTOUPDATE=1` set as the snap packaging would have (the snap's squashfs is read-only, so self-update cannot work). An explicit `MITTENS_OPENCODE_BIN` is used verbatim, without this resolution — though a binary under `/snap` still gets the autoupdate opt-out.
 
+### pi
+
+pi hardcodes `~/.pi`, and everything it keeps there lives in one subdirectory: `~/.pi/agent`, its global config directory (settings, credentials, sessions, the `fd` and `rg` binaries it downloads, and the authored config below). mittens shadows the whole dot directory. State directory (default: `~/.local/state/pi-home`):
+
+    dot-pi/        what pi sees as ~/.pi
+
+pi has no `~/.claude.json` analogue, so nothing is copy-synced. Project-local `.pi` directories are pi's own convention inside a repository, and mittens leaves them alone.
+
+The shared agent config is bind-mounted into what pi sees as `~/.pi/agent`, exactly as it is for claude:
+
+    ~/.config/agents/skills    -> ~/.pi/agent/skills
+    ~/.config/agents/prompts   -> ~/.pi/agent/prompts
+    ~/.config/agents/themes    -> ~/.pi/agent/themes
+    ~/.config/agents/tools     -> ~/.pi/agent/tools
+    ~/.config/agents/AGENTS.md -> ~/.pi/agent/AGENTS.md   (read-only)
+
+pi reads `AGENTS.md` from that directory as its global context file, so the memory file keeps the shared name instead of being renamed. Each mount is optional, as for claude. Machine-specific state (settings.json, auth.json, models-store.json, sessions, downloaded binaries) is not shared and stays in the state dir.
+
+When pi is installed as a snap (`pi-coding-agent`, classic), the `pi` on PATH is the snap dispatcher — and mittens keeps that path rather than resolving past it as it does for opencode. The pi snap's command is a launcher script that dereferences `$SNAP`, so it cannot be exec'd bare. Inside the namespace `/snap/bin` is the shim directory below, whose `pi` entry supplies that environment.
+
 ## Snap-packaged tools inside the sandbox
 
 The snap-confine refusal above hits every snap-installed tool the agent invokes *inside* the namespace, too — `tofu`, `uv`, `task`, whatever else `/snap/bin` holds — because each of those PATH entries is the same dispatcher. At launch, mittens generates a shim directory (`<state>/snap-bin`) and read-only bind-mounts it over `/snap/bin` inside the namespace:
@@ -73,7 +94,11 @@ That is fatal, not a warning, and it hits every ssh invocation inside the namesp
 
 ## Escape hatch
 
-`mittens harness:<name> --unsafe` skips bubblewrap and just execs the tool with an environment variable pointing at the state dir. Only claude supports it: Claude Code documents `CLAUDE_CONFIG_DIR` as relocating every `~/.claude` path, and it also moves the top-level config to `$CLAUDE_CONFIG_DIR/.claude.json` — a different location than the claude.json wrapped runs use, so the unsafe copy is seeded from claude.json once and evolves independently after that. The bind-mount wiring of the shared agent config is also absent in unsafe mode. Unlike the namespace, this depends entirely on Claude Code (and everything it spawns) honoring the environment variable — hence the name. opencode's `OPENCODE_CONFIG_DIR` only relocates config *loading*; nothing relocates `~/.opencode` itself, so opencode refuses `--unsafe`.
+`mittens harness:<name> --unsafe` skips bubblewrap and just execs the tool with an environment variable pointing at the state dir. Unlike the namespace, this depends entirely on the tool (and everything it spawns) honoring that variable — hence the name. The bind-mount wiring of the shared agent config is absent in unsafe mode for every harness.
+
+claude and pi support it. Claude Code documents `CLAUDE_CONFIG_DIR` as relocating every `~/.claude` path, and it also moves the top-level config to `$CLAUDE_CONFIG_DIR/.claude.json` — a different location than the claude.json wrapped runs use, so the unsafe copy is seeded from claude.json once and evolves independently after that. pi's `PI_CODING_AGENT_DIR` relocates the agent directory rather than `~/.pi`, so mittens points it one level into the state dir, at `dot-pi/agent`; wrapped and unsafe runs then read and write the same files, with nothing to seed.
+
+opencode refuses `--unsafe`: its `OPENCODE_CONFIG_DIR` only relocates config *loading*, and nothing relocates `~/.opencode` itself.
 
 ## Other commands
 
@@ -88,7 +113,7 @@ That is fatal, not a warning, and it hits every ssh invocation inside the namesp
 
 ## Caveats
 
-- Plain `claude`/`opencode` runs outside mittens will recreate their dotfiles in the real home; mittens refuses to start while any of the harness's real-home paths exist, to prevent silent divergence between the two. Consider aliasing `claude` to `mittens harness:claude` and `opencode` to `mittens harness:opencode` in your shell (if you shadow the real opencode with a wrapper named `opencode`, set `MITTENS_OPENCODE_BIN` so mittens does not resolve the wrapper from PATH and recurse).
+- Plain `claude`/`opencode`/`pi` runs outside mittens will recreate their dotfiles in the real home; mittens refuses to start while any of the harness's real-home paths exist, to prevent silent divergence between the two. Consider aliasing each tool to its `mittens harness:<name>` in your shell (if you shadow the real opencode or pi with a wrapper of the same name, set `MITTENS_OPENCODE_BIN` or `MITTENS_PI_BIN` so mittens does not resolve the wrapper from PATH and recurse).
 - New top-level entries created under `$HOME` inside the namespace land on the tmpfs and vanish on exit. If a tool needs a new persistent `~/.something`, create it in the real home first; it will be bound in on the next launch.
 - Only the current uid is mapped in the sandbox's user namespace, so files owned by anyone else (root included) appear as nobody:nogroup inside it. ssh is repaired specifically (see above); any other tool that insists on an ownership of its own config is subject to the same problem.
 - Tools' own bwrap-based sandboxing cannot start nested inside mittens under Debian's stock AppArmor policy: the stacked bwrap//&unpriv_bwrap profile denies creating a nested mount namespace. Fixable with a custom AppArmor profile for a private copy of bwrap.
@@ -103,9 +128,11 @@ That is fatal, not a warning, and it hits every ssh invocation inside the namesp
                            (default: ~/.local/bin/claude)
     MITTENS_OPENCODE_BIN   override the opencode executable
                            (default: first opencode on PATH)
+    MITTENS_PI_BIN         override the pi executable
+                           (default: first pi on PATH)
     MITTENS_AGENTS_DIR     override the shared agent config directory
                            (default: ${XDG_CONFIG_HOME:-~/.config}/agents;
-                           only the claude wiring uses it)
+                           the claude and pi wiring use it)
 
 ## Installation
 

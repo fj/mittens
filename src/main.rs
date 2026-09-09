@@ -140,18 +140,18 @@ Usage:
   mittens harness:<name> --migrate
                                   move the harness's existing real-home data
                                   (claude: ~/.claude and ~/.claude.json;
-                                  opencode: ~/.opencode) into its state
-                                  directory (run this once, with no sessions
-                                  of the harness running)
+                                  opencode: ~/.opencode; pi: ~/.pi) into its
+                                  state directory (run this once, with no
+                                  sessions of the harness running)
   mittens harness:<name> --unsafe [arguments...]
                                   skip the sandbox: exec the tool directly
                                   with its relocation variable pointing at
-                                  the state dir. claude only, via
-                                  CLAUDE_CONFIG_DIR: relies on the tool
-                                  honoring the variable instead of a
-                                  kernel-level redirect, the shared agent
-                                  config is not wired in, and claude's
-                                  top-level config lives at
+                                  the state dir. claude (CLAUDE_CONFIG_DIR)
+                                  and pi (PI_CODING_AGENT_DIR) only: it
+                                  relies on the tool honoring the variable
+                                  instead of a kernel-level redirect, and the
+                                  shared agent config is not wired in. claude
+                                  additionally keeps its top-level config at
                                   dot-claude/.claude.json (seeded once from
                                   claude.json, independent of wrapped runs
                                   after that)
@@ -187,7 +187,7 @@ help, run "mittens harness:<name> help").
 Harness:             {harness}
 State directory:     {state}
 Binary:              {bin}
-Shared agent config: {agents} (used by the claude wiring only)
+Shared agent config: {agents} (used by the claude and pi wiring)
 (Override with MITTENS_STATE_DIR / {bin_envs}
 / MITTENS_AGENTS_DIR.)
 "#,

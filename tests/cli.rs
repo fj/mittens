@@ -40,6 +40,11 @@ echo "ARGS: $*"
 exit 7
 "#;
 
+const FAKE_PI: &str = r#"#!/usr/bin/env bash
+echo "ARGS: $*"
+echo "PI_CODING_AGENT_DIR=${PI_CODING_AGENT_DIR:-unset}"
+"#;
+
 struct Harness {
     _tmp: tempfile::TempDir,
     home: PathBuf,
@@ -73,6 +78,7 @@ impl Harness {
         h.script("bwrap", FAKE_BWRAP);
         h.script("claude", FAKE_CLAUDE);
         h.script("opencode", FAKE_OPENCODE);
+        h.script("pi", FAKE_PI);
         // Deterministic "no processes running", whatever is live on the host.
         h.script("pgrep", "#!/usr/bin/env bash\nexit 1\n");
         h
@@ -95,6 +101,7 @@ impl Harness {
             .env("MITTENS_STATE_DIR", &self.state)
             .env("MITTENS_CLAUDE_BIN", self.fake_bin.join("claude"))
             .env("MITTENS_OPENCODE_BIN", self.fake_bin.join("opencode"))
+            .env("MITTENS_PI_BIN", self.fake_bin.join("pi"))
             .env("MITTENS_AGENTS_DIR", self.home.join(".config/agents"))
             .env("MITTENS_SNAP_ROOT", &self.snap_root)
             .env("MITTENS_ETC_SSH", &self.etc_ssh)
@@ -196,6 +203,62 @@ fn opencode_wrapped_run_binds_dot_opencode_only_and_propagates_exit() {
     // The stub exits 7; mittens must propagate it.
     assert_eq!(out.status.code(), Some(7));
     assert!(!h.state.join("claude.json").exists());
+}
+
+#[test]
+fn pi_wrapped_run_binds_dot_pi_and_wires_the_agent_config() {
+    let h = Harness::new();
+    fs::create_dir_all(h.home.join(".config/agents/skills")).unwrap();
+    fs::create_dir_all(h.home.join(".config/agents/prompts")).unwrap();
+    fs::write(h.home.join(".config/agents/AGENTS.md"), "# memory\n").unwrap();
+
+    let out = h.mittens(&["harness:pi", "chat", "-p"]);
+    let text = stdout(&out);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+
+    let home = h.home.display().to_string();
+    assert!(text.contains(&format!("--bind {}/dot-pi -> {home}/.pi", h.state.display())));
+    // The shared config lands in pi's global config directory, ~/.pi/agent.
+    assert!(text.contains(&format!(
+        "--bind {home}/.config/agents/skills -> {home}/.pi/agent/skills"
+    )));
+    assert!(text.contains(&format!(
+        "--bind {home}/.config/agents/prompts -> {home}/.pi/agent/prompts"
+    )));
+    assert!(text.contains(&format!(
+        "--ro-bind {home}/.config/agents/AGENTS.md -> {home}/.pi/agent/AGENTS.md"
+    )));
+    // Nothing is copy-synced, and wrapped runs leave the variable alone.
+    assert!(text.contains("PI_CODING_AGENT_DIR=unset"));
+    assert!(text.contains("ARGS: chat -p"));
+    assert_no_stray(&h.home, ".pi");
+}
+
+#[test]
+fn pi_unsafe_points_the_agent_dir_at_the_wrapped_one() {
+    let h = Harness::new();
+
+    let out = h.mittens(&["harness:pi", "--unsafe", "hi"]);
+    let text = stdout(&out);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    // One level into the state dir: PI_CODING_AGENT_DIR relocates ~/.pi/agent,
+    // so unsandboxed runs must land on the same files wrapped runs write.
+    assert!(
+        text.contains(&format!("PI_CODING_AGENT_DIR={}/dot-pi/agent", h.state.display())),
+        "stdout: {text}"
+    );
+    assert!(text.contains("ARGS: hi"));
+}
+
+#[test]
+fn pi_migrate_moves_dot_dir() {
+    let h = Harness::new();
+    fs::create_dir_all(h.home.join(".pi/agent/sessions")).unwrap();
+
+    let out = h.mittens(&["harness:pi", "--migrate"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(h.state.join("dot-pi/agent/sessions").is_dir());
+    assert!(!h.home.join(".pi").exists());
 }
 
 #[test]
@@ -346,7 +409,7 @@ fn missing_harness_is_rejected() {
     assert_eq!(out.status.code(), Some(1));
     let err = stderr(&out);
     assert!(err.contains("the first argument must select a harness"));
-    assert!(err.contains("claude, opencode"));
+    assert!(err.contains("claude, opencode, pi"));
 
     // A bare harness name gets a did-you-mean.
     let out = h.mittens(&["opencode", "run"]);
@@ -366,7 +429,7 @@ fn unknown_harness_is_rejected() {
     assert_eq!(out.status.code(), Some(1));
     let err = stderr(&out);
     assert!(err.contains("unknown harness \"emacs\""));
-    assert!(err.contains("claude, opencode"));
+    assert!(err.contains("claude, opencode, pi"));
 
     // An empty name is an unknown harness, not a passthrough.
     let out = h.mittens(&["harness:"]);

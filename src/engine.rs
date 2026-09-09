@@ -179,7 +179,7 @@ fn sorted_home_entries(home: &Path) -> Result<Vec<OsString>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harnesses::{CLAUDE, Harness, OPENCODE};
+    use crate::harnesses::{CLAUDE, Harness, OPENCODE, PI};
     use std::path::PathBuf;
 
     fn scratch_ctx(harness: Harness) -> (tempfile::TempDir, Ctx) {
@@ -217,8 +217,11 @@ mod tests {
         fs::create_dir_all(ctx.home.join(".claude")).unwrap();
         fs::write(ctx.home.join(".claude.json"), "{}").unwrap();
         fs::write(ctx.home.join(".claude.json.backup"), "{}").unwrap();
-        // Shared agent config with two of the optional sources present.
-        fs::create_dir_all(ctx.agents_cfg.join("agents")).unwrap();
+        // Shared agent config: every name claude is meant to take, plus one
+        // it is not.
+        for d in ["agents", "commands", "skills", "hooks", "output-styles", "plugins"] {
+            fs::create_dir_all(ctx.agents_cfg.join(d)).unwrap();
+        }
         fs::write(ctx.agents_cfg.join("AGENTS.md"), "# memory\n").unwrap();
 
         let args = strs(&bwrap_args(&ctx).unwrap());
@@ -233,14 +236,19 @@ mod tests {
         // agent-config mountpoints, never as a --dev-bind source.
         let dot_bind = args.iter().position(|a| a == &ctx.dot_state().display().to_string());
         assert!(dot_bind.is_some_and(|i| args[i - 1] == "--bind" && args[i + 1] == format!("{home}/.claude")));
-        assert!(args.windows(3).any(|w| w[0] == "--bind"
-            && w[1] == ctx.agents_cfg.join("agents").display().to_string()
-            && w[2] == format!("{home}/.claude/agents")));
+        for d in ["agents", "commands", "skills", "hooks", "output-styles"] {
+            assert!(
+                args.windows(3).any(|w| w[0] == "--bind"
+                    && w[1] == ctx.agents_cfg.join(d).display().to_string()
+                    && w[2] == format!("{home}/.claude/{d}")),
+                "{d} is not wired"
+            );
+        }
         assert!(args.windows(3).any(|w| w[0] == "--ro-bind"
             && w[1] == ctx.agents_cfg.join("AGENTS.md").display().to_string()
             && w[2] == format!("{home}/.claude/CLAUDE.md")));
-        // Absent optional sources are not wired.
-        assert!(!args.iter().any(|a| a.ends_with("/.claude/skills")));
+        // Names outside claude's list stay in the shared config.
+        assert!(!args.iter().any(|a| a.ends_with("/.claude/plugins")));
         // Empty CLAUDE.md mountpoint was created on the dot-claude bind.
         assert!(ctx.dot_state().join("CLAUDE.md").is_file());
     }
@@ -259,6 +267,41 @@ mod tests {
         assert!(!args.iter().any(|a| a.contains("CLAUDE.md") || a.contains("/agents")));
         // Nothing sets environment for a plain opencode binary.
         assert!(!args.contains(&"--setenv".to_string()));
+    }
+
+    #[test]
+    fn pi_args_wire_the_agent_config_one_level_into_the_dot_dir() {
+        let (_tmp, ctx) = scratch_ctx(PI);
+        for d in ["skills", "prompts", "themes", "tools", "output-styles"] {
+            fs::create_dir_all(ctx.agents_cfg.join(d)).unwrap();
+        }
+        fs::write(ctx.agents_cfg.join("AGENTS.md"), "# memory\n").unwrap();
+
+        let args = strs(&bwrap_args(&ctx).unwrap());
+        let home = ctx.home.display().to_string();
+
+        assert!(args.windows(3).any(|w| w[0] == "--bind"
+            && w[1] == ctx.dot_state().display().to_string()
+            && w[2] == format!("{home}/.pi")));
+        // pi's global config is ~/.pi/agent, not ~/.pi itself, and it reads
+        // the memory file under the shared config's own name.
+        for d in ["skills", "prompts", "themes", "tools"] {
+            assert!(
+                args.windows(3).any(|w| w[0] == "--bind"
+                    && w[1] == ctx.agents_cfg.join(d).display().to_string()
+                    && w[2] == format!("{home}/.pi/agent/{d}")),
+                "{d} is not wired"
+            );
+            assert!(ctx.dot_state().join("agent").join(d).is_dir());
+        }
+        assert!(args.windows(3).any(|w| w[0] == "--ro-bind"
+            && w[1] == ctx.agents_cfg.join("AGENTS.md").display().to_string()
+            && w[2] == format!("{home}/.pi/agent/AGENTS.md")));
+        // Mountpoints were materialized below dot-pi, which bwrap needs even
+        // though pi has never run and created the agent directory itself.
+        assert!(ctx.dot_state().join("agent/AGENTS.md").is_file());
+        // claude-only names stay in the shared config.
+        assert!(!args.iter().any(|a| a.ends_with("/.pi/agent/output-styles")));
     }
 
     #[test]
