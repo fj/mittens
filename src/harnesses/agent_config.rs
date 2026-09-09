@@ -63,3 +63,40 @@ pub fn mounts(ctx: &Ctx, root: &str, dirs: &[&str], memory_as: &str) -> Result<V
     }
     Ok(args)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harnesses::PI;
+
+    /// A shared config holding only the memory file, wired into a `root` no
+    /// directory mount has created yet: the memory mountpoint has to bring its
+    /// own parent along, and the absent directory costs nothing.
+    #[test]
+    fn the_memory_file_alone_still_gets_a_mountpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Ctx {
+            harness: PI,
+            home: tmp.path().join("home"),
+            bin: None,
+            state: tmp.path().join("state"),
+            agents_cfg: tmp.path().join("agents"),
+            snap_root: tmp.path().join("snap-root"),
+            etc_ssh: tmp.path().join("etc-ssh"),
+        };
+        fs::create_dir_all(&ctx.agents_cfg).unwrap();
+        fs::write(ctx.agents_cfg.join(MEMORY), "# memory\n").unwrap();
+
+        let args = mounts(&ctx, "agent", &["skills"], MEMORY).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--ro-bind"),
+                ctx.agents_cfg.join(MEMORY).into(),
+                ctx.home.join(".pi/agent").join(MEMORY).into(),
+            ]
+        );
+        assert!(ctx.dot_state().join("agent").join(MEMORY).is_file());
+    }
+}

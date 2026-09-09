@@ -44,7 +44,7 @@ impl HarnessSpec for Claude {
     }
 
     fn unsafe_support(&self) -> UnsafeSupport {
-        UnsafeSupport::Via("CLAUDE_CONFIG_DIR")
+        UnsafeSupport::Via { var: "CLAUDE_CONFIG_DIR", dir: None }
     }
 
     fn prepare_unsafe(&self, ctx: &Ctx) -> Result<()> {

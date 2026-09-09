@@ -14,6 +14,7 @@
 mod agent_config;
 mod claude;
 mod opencode;
+mod pi;
 
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -29,8 +30,13 @@ use crate::util::entries_with_prefix;
 
 /// Whether a tool can run outside the sandbox, and how.
 pub enum UnsafeSupport {
-    /// The variable that relocates every path the tool hardcodes.
-    Via(&'static str),
+    /// The variable that relocates every path the tool hardcodes, and what it
+    /// must point at: the state directory the sandbox mounts over the tool's
+    /// dot-directory, or `dir` below it when the variable relocates something
+    /// deeper. Declaring the variable therefore forces declaring its target,
+    /// so wrapped and unsandboxed runs cannot silently address different
+    /// files.
+    Via { var: &'static str, dir: Option<&'static str> },
     /// Why the tool has no such variable.
     Refused(&'static str),
 }
@@ -86,10 +92,11 @@ pub struct Harness(&'static dyn HarnessSpec);
 
 pub const CLAUDE: Harness = Harness(&claude::Claude);
 pub const OPENCODE: Harness = Harness(&opencode::Opencode);
+pub const PI: Harness = Harness(&pi::Pi);
 
 impl Harness {
     /// Every harness mittens knows about.
-    pub const ALL: [Harness; 2] = [CLAUDE, OPENCODE];
+    pub const ALL: [Harness; 3] = [CLAUDE, OPENCODE, PI];
 
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|h| h.name() == name)
@@ -133,11 +140,15 @@ impl Harness {
     /// the state dir, then clear whatever it left in the real home. Supervision
     /// lives here so no harness can skip the cleanup its own run depends on.
     pub fn unsafe_exec(self, ctx: &Ctx, bin: &Path, args: &[OsString]) -> Result<Infallible> {
-        let var = match self.0.unsafe_support() {
-            UnsafeSupport::Via(var) => var,
+        let (var, dir) = match self.0.unsafe_support() {
+            UnsafeSupport::Via { var, dir } => (var, dir),
             UnsafeSupport::Refused(reason) => {
                 bail!("--unsafe is not supported for {}: {reason}", self.name())
             }
+        };
+        let target = match dir {
+            Some(dir) => ctx.dot_state().join(dir),
+            None => ctx.dot_state(),
         };
         self.0.prepare_unsafe(ctx)?;
         // Ignore SIGINT/SIGQUIT in the parent so Ctrl-C reaches the child but
@@ -147,7 +158,7 @@ impl Harness {
             libc::signal(libc::SIGQUIT, libc::SIG_IGN);
         }
         let mut cmd = Command::new(bin);
-        cmd.args(args).env(var, ctx.dot_state());
+        cmd.args(args).env(var, target);
         unsafe {
             cmd.pre_exec(|| {
                 libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -323,6 +334,12 @@ mod tests {
         assert_eq!(o.dot_state(), PathBuf::from("/h/.local/state/opencode-home/dot-opencode"));
         assert_eq!(o.sync_state(), None);
         assert_eq!(o.bin, None); // no opencode on the empty PATH
+
+        let p = Ctx::resolve_with(PI, &env);
+        assert_eq!(p.state, PathBuf::from("/h/.local/state/pi-home"));
+        assert_eq!(p.dot_state(), PathBuf::from("/h/.local/state/pi-home/dot-pi"));
+        assert_eq!(p.sync_state(), None);
+        assert_eq!(p.bin, None); // no pi on the empty PATH
     }
 
     #[test]
@@ -353,7 +370,7 @@ mod tests {
         }
         assert_ne!(CLAUDE, OPENCODE);
         assert_eq!(Harness::from_name("emacs"), None);
-        assert_eq!(Harness::known(), "claude, opencode");
+        assert_eq!(Harness::known(), "claude, opencode, pi");
     }
 
     #[test]
