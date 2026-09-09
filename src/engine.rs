@@ -10,7 +10,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::harness::Ctx;
+use crate::harnesses::Ctx;
 use crate::util::{entries_with_prefix, is_executable, name_starts_with, which};
 use crate::wipe;
 
@@ -179,7 +179,7 @@ fn sorted_home_entries(home: &Path) -> Result<Vec<OsString>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::Harness;
+    use crate::harnesses::{CLAUDE, Harness, OPENCODE};
     use std::path::PathBuf;
 
     fn scratch_ctx(harness: Harness) -> (tempfile::TempDir, Ctx) {
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn claude_args_shadow_dot_and_sync_file_and_wire_agents() {
-        let (_tmp, ctx) = scratch_ctx(Harness::Claude);
+        let (_tmp, ctx) = scratch_ctx(CLAUDE);
         // Stray-looking entries inside home must be skipped from the binds
         // (inside the namespace they are shadowed, not bound back).
         fs::create_dir_all(ctx.home.join(".claude")).unwrap();
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn opencode_args_have_no_sync_or_agent_wiring() {
-        let (_tmp, ctx) = scratch_ctx(Harness::Opencode);
+        let (_tmp, ctx) = scratch_ctx(OPENCODE);
         fs::create_dir_all(ctx.agents_cfg.join("agents")).unwrap();
 
         let args = strs(&bwrap_args(&ctx).unwrap());
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn opencode_snap_binary_disables_autoupdate() {
-        let (_tmp, mut ctx) = scratch_ctx(Harness::Opencode);
+        let (_tmp, mut ctx) = scratch_ctx(OPENCODE);
         // A non-snap binary gets no extra environment.
         let args = strs(&bwrap_args(&ctx).unwrap());
         assert!(!args.contains(&"OPENCODE_DISABLE_AUTOUPDATE".to_string()));
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn ssh_wiring_is_appended() {
-        let (_tmp, ctx) = scratch_ctx(Harness::Claude);
+        let (_tmp, ctx) = scratch_ctx(CLAUDE);
         // No system-wide ssh config: nothing to replicate, nothing appended.
         let args = strs(&bwrap_args(&ctx).unwrap());
         assert!(!args.iter().any(|a| a.contains("ssh-config")));
@@ -304,14 +304,14 @@ mod tests {
 
     #[test]
     fn stray_detection_matches_guard_globs() {
-        let (_tmp, ctx) = scratch_ctx(Harness::Claude);
+        let (_tmp, ctx) = scratch_ctx(CLAUDE);
         assert!(stray_paths(&ctx).unwrap().is_empty());
         fs::write(ctx.home.join(".claude.json.corrupt.bak"), "{}").unwrap();
         assert_eq!(stray_paths(&ctx).unwrap(), vec!["~/.claude.json.corrupt.bak"]);
         fs::create_dir_all(ctx.home.join(".claude")).unwrap();
         assert_eq!(stray_paths(&ctx).unwrap(), vec!["~/.claude", "~/.claude.json.corrupt.bak"]);
 
-        let (_tmp, octx) = scratch_ctx(Harness::Opencode);
+        let (_tmp, octx) = scratch_ctx(OPENCODE);
         fs::write(octx.home.join(".opencode-lookalike"), "").unwrap();
         // Only the exact dot-dir counts for harnesses without a sync file.
         assert!(stray_paths(&octx).unwrap().is_empty());

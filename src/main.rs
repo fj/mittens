@@ -4,13 +4,13 @@
 //! instead of following the XDG Base Directory spec. mittens runs the agent
 //! inside a private mount namespace (via bubblewrap) where those paths are
 //! redirected to an XDG-compliant state directory, so the real home directory
-//! stays free of tool cruft. See README.md for the full story; src/harness.rs
+//! stays free of tool cruft. See README.md for the full story; src/harnesses/
 //! for what each supported tool needs; src/engine.rs for the namespace.
 
 use std::ffi::OsString;
 
 mod engine;
-mod harness;
+mod harnesses;
 mod inner;
 mod migrate;
 mod snap;
@@ -18,7 +18,7 @@ mod ssh;
 mod util;
 mod wipe;
 
-use harness::{Ctx, Harness};
+use harnesses::{Ctx, Harness};
 
 const HARNESS_PREFIX: &str = "harness:";
 
@@ -188,12 +188,13 @@ Harness:             {harness}
 State directory:     {state}
 Binary:              {bin}
 Shared agent config: {agents} (used by the claude wiring only)
-(Override with MITTENS_STATE_DIR / MITTENS_CLAUDE_BIN / MITTENS_OPENCODE_BIN
+(Override with MITTENS_STATE_DIR / {bin_envs}
 / MITTENS_AGENTS_DIR.)
 "#,
         harness = ctx.harness.name(),
         state = ctx.state.display(),
         bin = ctx.bin.as_ref().map_or("(not found)".into(), |b| b.display().to_string()),
         agents = ctx.agents_cfg.display(),
+        bin_envs = Harness::ALL.map(Harness::bin_env).join(" / "),
     )
 }

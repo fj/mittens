@@ -10,7 +10,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::harness::Ctx;
+use crate::harnesses::Ctx;
 use crate::util::{entries_with_prefix, human_size, pause, pgrep};
 
 pub fn skip_pawmissions(ctx: &Ctx) -> Result<()> {

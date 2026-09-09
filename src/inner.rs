@@ -14,7 +14,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::harness::Ctx;
+use crate::harnesses::Ctx;
 use crate::util::entries_with_prefix;
 
 pub const SUBCOMMAND: &str = "__inner";

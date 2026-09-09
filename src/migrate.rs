@@ -5,7 +5,7 @@ use std::fs;
 
 use anyhow::{Context, Result, bail};
 
-use crate::harness::Ctx;
+use crate::harnesses::Ctx;
 use crate::util::{entries_with_prefix, pgrep};
 
 pub fn run(ctx: &Ctx) -> Result<()> {
