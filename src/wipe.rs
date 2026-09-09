@@ -19,7 +19,10 @@ pub fn skip_pawmissions(ctx: &Ctx) -> Result<()> {
 
     eprintln!("mittens: --dangerously-skip-pawmissions");
     if targets.is_empty() {
-        eprintln!("mittens: no real-home {harness} data ({}); nothing to wipe", ctx.guard_names());
+        eprintln!(
+            "mittens: no real-home {harness} data ({}); nothing to wipe",
+            ctx.guard_names()
+        );
         return Ok(());
     }
 
@@ -35,9 +38,13 @@ pub fn skip_pawmissions(ctx: &Ctx) -> Result<()> {
     let pids = pgrep(harness);
     if !pids.is_empty() {
         eprintln!();
-        eprintln!("mittens: WARNING — {harness} appears to be running ({}):", pids.join(", "));
-        if let Ok(out) =
-            Command::new("ps").args(["-o", "pid=,etime=,args=", "-p", &pids.join(",")]).output()
+        eprintln!(
+            "mittens: WARNING — {harness} appears to be running ({}):",
+            pids.join(", ")
+        );
+        if let Ok(out) = Command::new("ps")
+            .args(["-o", "pid=,etime=,args=", "-p", &pids.join(",")])
+            .output()
         {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 eprintln!("  {line}");
@@ -80,10 +87,16 @@ fn targets(ctx: &Ctx) -> Result<Vec<PathBuf>> {
 fn inspect(path: &Path) {
     if path.is_dir() {
         let (entries, bytes) = dir_stats(path);
-        eprintln!("  {}  (dir, {}, {entries} entries)", path.display(), human_size(bytes));
+        eprintln!(
+            "  {}  (dir, {}, {entries} entries)",
+            path.display(),
+            human_size(bytes)
+        );
         if let Ok(dir) = fs::read_dir(path) {
-            let mut names: Vec<_> =
-                dir.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            let mut names: Vec<_> = dir
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
             names.sort();
             for name in names {
                 eprintln!("        {name}");
@@ -98,7 +111,9 @@ fn inspect(path: &Path) {
 /// Recursive entry count and byte total, like `find | wc -l` + `du -s`.
 fn dir_stats(path: &Path) -> (u64, u64) {
     let (mut entries, mut bytes) = (0, 0);
-    let Ok(dir) = fs::read_dir(path) else { return (entries, bytes) };
+    let Ok(dir) = fs::read_dir(path) else {
+        return (entries, bytes);
+    };
     for entry in dir.filter_map(|e| e.ok()) {
         entries += 1;
         let Ok(meta) = entry.metadata() else { continue };
@@ -129,5 +144,8 @@ fn countdown() {
         let _ = std::io::stderr().flush();
         pause(1);
     }
-    eprintln!("\r  \x1b[1;31m[{}]\x1b[0m  deleting now      ", "#".repeat(WIDTH));
+    eprintln!(
+        "\r  \x1b[1;31m[{}]\x1b[0m  deleting now      ",
+        "#".repeat(WIDTH)
+    );
 }

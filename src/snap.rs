@@ -120,7 +120,9 @@ fn resolve_entry(snap_bin: &Path, name: &OsStr, snap_root: &Path) -> Option<Shim
             Err(_) => break,
         }
     }
-    let (snap, app) = qualified.split_once('.').unwrap_or((&*qualified, &*qualified));
+    let (snap, app) = qualified
+        .split_once('.')
+        .unwrap_or((&*qualified, &*qualified));
     match classic_command_wrapper(snap_root, snap, app) {
         Some(script) => Some(Shim::Wrapper(script)),
         None => Some(Shim::Symlink(target)),
@@ -157,7 +159,10 @@ fn classic_command_wrapper(snap_root: &Path, snap: &str, app_name: &str) -> Opti
     );
     // `current` rather than the revision directory, so the shim keeps working
     // across a snap refresh during a running session.
-    script.push_str(&format!("export SNAP=\"{}\"\n", sh_dq(&snap_dir.to_string_lossy())));
+    script.push_str(&format!(
+        "export SNAP=\"{}\"\n",
+        sh_dq(&snap_dir.to_string_lossy())
+    ));
     script.push_str(&format!("export SNAP_NAME=\"{}\"\n", sh_dq(snap)));
     script.push_str(&format!("export SNAP_INSTANCE_NAME=\"{}\"\n", sh_dq(snap)));
     if let Some(rev) = fs::read_link(&snap_dir)
@@ -237,7 +242,10 @@ struct SnapApp {
 /// their expected depth, so free text in block scalars (`description: |`)
 /// cannot be mistaken for structure.
 fn parse_snap_yaml(text: &str) -> SnapMeta {
-    let mut meta = SnapMeta { confinement: None, apps: Vec::new() };
+    let mut meta = SnapMeta {
+        confinement: None,
+        apps: Vec::new(),
+    };
     let mut in_apps = false;
     let mut in_env = false;
     for line in text.lines() {
@@ -262,7 +270,11 @@ fn parse_snap_yaml(text: &str) -> SnapMeta {
             if let Some(name) = trimmed.strip_suffix(':')
                 && !name.contains(' ')
             {
-                meta.apps.push(SnapApp { name: name.to_string(), command: None, env: Vec::new() });
+                meta.apps.push(SnapApp {
+                    name: name.to_string(),
+                    command: None,
+                    env: Vec::new(),
+                });
             }
             continue;
         }
@@ -280,7 +292,8 @@ fn parse_snap_yaml(text: &str) -> SnapMeta {
             && indent == 6
             && let Some((k, v)) = trimmed.split_once(':')
         {
-            app.env.push((k.trim().to_string(), unquote(v.trim()).to_string()));
+            app.env
+                .push((k.trim().to_string(), unquote(v.trim()).to_string()));
         }
     }
     meta
@@ -377,7 +390,9 @@ grade: stable
             fs::create_dir_all(dispatcher.parent().unwrap()).unwrap();
             fs::write(&dispatcher, "").unwrap();
             fs::set_permissions(&dispatcher, fs::Permissions::from_mode(0o755)).unwrap();
-            FakeSnaps { root: root.to_path_buf() }
+            FakeSnaps {
+                root: root.to_path_buf(),
+            }
         }
 
         fn dispatcher(&self) -> PathBuf {
@@ -455,7 +470,10 @@ grade: stable
         }
 
         // The strict snap's dispatcher symlink is replicated verbatim.
-        assert_eq!(fs::read_link(shim_dir.join("strictly")).unwrap(), snaps.dispatcher());
+        assert_eq!(
+            fs::read_link(shim_dir.join("strictly")).unwrap(),
+            snaps.dispatcher()
+        );
     }
 
     #[test]
@@ -477,12 +495,18 @@ grade: stable
         fs::create_dir_all(&state).unwrap();
         assert!(!shim_args(&state, tmp.path()).unwrap().is_empty());
         let shim_dir = state.join("snap-bin");
-        assert_eq!(fs::read_link(shim_dir.join("hand-placed")).unwrap(), Path::new("/bin/true"));
+        assert_eq!(
+            fs::read_link(shim_dir.join("hand-placed")).unwrap(),
+            Path::new("/bin/true")
+        );
         assert_eq!(
             fs::read_link(shim_dir.join("dangling")).unwrap(),
             Path::new("/nonexistent-target")
         );
-        assert_eq!(fs::read_to_string(shim_dir.join("plain")).unwrap(), "#!/bin/sh\necho plain\n");
+        assert_eq!(
+            fs::read_to_string(shim_dir.join("plain")).unwrap(),
+            "#!/bin/sh\necho plain\n"
+        );
         assert!(is_executable(&shim_dir.join("plain")));
     }
 
@@ -564,7 +588,11 @@ grade: stable
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         fs::create_dir_all(&state).unwrap();
-        assert!(shim_args(&state, &tmp.path().join("nope")).unwrap().is_empty());
+        assert!(
+            shim_args(&state, &tmp.path().join("nope"))
+                .unwrap()
+                .is_empty()
+        );
         assert!(!state.join("snap-bin").exists());
     }
 

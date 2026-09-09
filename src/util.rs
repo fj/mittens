@@ -28,7 +28,11 @@ pub fn which(name: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathB
 /// permissions and is not confined but should be") — so it can never work
 /// under bwrap.
 pub fn is_snap_dispatcher(path: &Path) -> bool {
-    fs::canonicalize(path).ok().as_deref().and_then(Path::file_name) == Some(OsStr::new("snap"))
+    fs::canonicalize(path)
+        .ok()
+        .as_deref()
+        .and_then(Path::file_name)
+        == Some(OsStr::new("snap"))
 }
 
 /// Resolve a PATH hit that is really the snap dispatcher to the app's real
@@ -135,7 +139,10 @@ mod tests {
         fs::write(&real, "").unwrap();
         fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert_eq!(resolve_snap_shim("opencode", &shim, &snap_root), Some(real.clone()));
+        assert_eq!(
+            resolve_snap_shim("opencode", &shim, &snap_root),
+            Some(real.clone())
+        );
 
         // A non-dispatcher hit passes through untouched.
         assert_eq!(resolve_snap_shim("opencode", &real, &snap_root), None);
@@ -151,7 +158,10 @@ mod tests {
             cargo_install_root(Path::new("/x/tools/bin/mittens")),
             Some(Path::new("/x/tools"))
         );
-        assert_eq!(cargo_install_root(Path::new("/x/target/debug/mittens")), None);
+        assert_eq!(
+            cargo_install_root(Path::new("/x/target/debug/mittens")),
+            None
+        );
         assert_eq!(cargo_install_root(Path::new("mittens")), None);
     }
 

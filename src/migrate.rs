@@ -22,8 +22,14 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     // otherwise it reports success while the guard keeps advising --migrate.
     if home_dot.symlink_metadata().is_ok() {
         if dot_state.symlink_metadata().is_ok() {
-            if fs::read_dir(&dot_state).map(|mut d| d.next().is_some()).unwrap_or(true) {
-                bail!("refusing to migrate: {} already contains data", dot_state.display());
+            if fs::read_dir(&dot_state)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(true)
+            {
+                bail!(
+                    "refusing to migrate: {} already contains data",
+                    dot_state.display()
+                );
             }
             fs::remove_dir(&dot_state)?;
         }
@@ -40,7 +46,9 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         let backups = entries_with_prefix(&ctx.home, &format!("{sync}."))
             .with_context(|| format!("reading {}", ctx.home.display()))?;
         for backup in backups {
-            let dest = ctx.state.join(backup.file_name().expect("backup has a file name"));
+            let dest = ctx
+                .state
+                .join(backup.file_name().expect("backup has a file name"));
             rename(&backup, &dest)?;
             println!("moved {} -> {}/", backup.display(), ctx.state.display());
         }

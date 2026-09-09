@@ -72,9 +72,20 @@ impl Harness {
         fs::write(home.join(".ssh/config"), "Host *\n").unwrap();
         fs::create_dir_all(&fake_bin).unwrap();
         fs::create_dir_all(etc_ssh.join("ssh_config.d")).unwrap();
-        fs::write(etc_ssh.join("ssh_config"), "Include ssh_config.d/*.conf\nHost *\n").unwrap();
+        fs::write(
+            etc_ssh.join("ssh_config"),
+            "Include ssh_config.d/*.conf\nHost *\n",
+        )
+        .unwrap();
         fs::write(etc_ssh.join("ssh_config.d/20-proxy.conf"), "Host .host\n").unwrap();
-        let h = Harness { _tmp: tmp, home, state, fake_bin, snap_root, etc_ssh };
+        let h = Harness {
+            _tmp: tmp,
+            home,
+            state,
+            fake_bin,
+            snap_root,
+            etc_ssh,
+        };
         h.script("bwrap", FAKE_BWRAP);
         h.script("claude", FAKE_CLAUDE);
         h.script("opencode", FAKE_OPENCODE);
@@ -156,9 +167,19 @@ fn claude_wrapped_run_syncs_and_passes_args_through() {
     // system and OpenSSH aborts on its nobody:nogroup owner inside the
     // namespace. The replica is byte-identical.
     let drop_in = h.etc_ssh.join("ssh_config.d/20-proxy.conf");
-    let replica = h.state.join("ssh-config").join(drop_in.strip_prefix("/").unwrap());
-    assert!(text.contains(&format!("--ro-bind {} -> {}", replica.display(), drop_in.display())));
-    assert_eq!(fs::read_to_string(&replica).unwrap(), fs::read_to_string(&drop_in).unwrap());
+    let replica = h
+        .state
+        .join("ssh-config")
+        .join(drop_in.strip_prefix("/").unwrap());
+    assert!(text.contains(&format!(
+        "--ro-bind {} -> {}",
+        replica.display(),
+        drop_in.display()
+    )));
+    assert_eq!(
+        fs::read_to_string(&replica).unwrap(),
+        fs::read_to_string(&drop_in).unwrap()
+    );
     // The system-wide file itself is read without an ownership check, so it is
     // not overmounted (matched whole-line: it is a path prefix of the drop-in).
     let system_config = format!("-> {}", h.etc_ssh.join("ssh_config").display());
@@ -169,7 +190,10 @@ fn claude_wrapped_run_syncs_and_passes_args_through() {
     // Fresh state was seeded with an empty JSON object and the tool's
     // rename-rewrite plus backup were synced back out.
     assert!(text.contains("{}"));
-    assert_eq!(fs::read_to_string(h.state.join("claude.json")).unwrap(), "{\"rewritten\":true}\n");
+    assert_eq!(
+        fs::read_to_string(h.state.join("claude.json")).unwrap(),
+        "{\"rewritten\":true}\n"
+    );
     assert_eq!(
         fs::read_to_string(h.state.join(".claude.json.backup")).unwrap(),
         "{\"backup\":true}\n"
@@ -217,7 +241,10 @@ fn pi_wrapped_run_binds_dot_pi_and_wires_the_agent_config() {
     assert!(out.status.success(), "stderr: {}", stderr(&out));
 
     let home = h.home.display().to_string();
-    assert!(text.contains(&format!("--bind {}/dot-pi -> {home}/.pi", h.state.display())));
+    assert!(text.contains(&format!(
+        "--bind {}/dot-pi -> {home}/.pi",
+        h.state.display()
+    )));
     // The shared config lands in pi's global config directory, ~/.pi/agent.
     assert!(text.contains(&format!(
         "--bind {home}/.config/agents/skills -> {home}/.pi/agent/skills"
@@ -244,7 +271,10 @@ fn pi_unsafe_points_the_agent_dir_at_the_wrapped_one() {
     // One level into the state dir: PI_CODING_AGENT_DIR relocates ~/.pi/agent,
     // so unsandboxed runs must land on the same files wrapped runs write.
     assert!(
-        text.contains(&format!("PI_CODING_AGENT_DIR={}/dot-pi/agent", h.state.display())),
+        text.contains(&format!(
+            "PI_CODING_AGENT_DIR={}/dot-pi/agent",
+            h.state.display()
+        )),
         "stdout: {text}"
     );
     assert!(text.contains("ARGS: hi"));
@@ -270,7 +300,9 @@ fn guard_refuses_stray_home_data() {
     let out = h.mittens(&["harness:claude", "hello"]);
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1));
-    assert!(err.contains("refusing to start: found ~/.claude ~/.claude.json.backup in the real home"));
+    assert!(
+        err.contains("refusing to start: found ~/.claude ~/.claude.json.backup in the real home")
+    );
     assert!(err.contains("run: mittens harness:claude --migrate"));
 
     // Populated state directory changes the advice.
@@ -295,8 +327,14 @@ fn migrate_moves_dot_dir_sync_file_and_backups() {
     assert!(text.contains("moved ~/.claude.json ->"));
     assert!(text.contains("migration complete"));
     assert!(h.state.join("dot-claude/projects").is_dir());
-    assert_eq!(fs::read_to_string(h.state.join("claude.json")).unwrap(), "{\"real\":1}");
-    assert_eq!(fs::read_to_string(h.state.join(".claude.json.backup")).unwrap(), "{\"old\":1}");
+    assert_eq!(
+        fs::read_to_string(h.state.join("claude.json")).unwrap(),
+        "{\"real\":1}"
+    );
+    assert_eq!(
+        fs::read_to_string(h.state.join(".claude.json.backup")).unwrap(),
+        "{\"old\":1}"
+    );
     assert!(!h.home.join(".claude").exists());
     assert!(!h.home.join(".claude.json").exists());
 
@@ -319,7 +357,13 @@ fn migrate_moves_a_dangling_symlink() {
     assert!(stdout(&out).contains("moved ~/.claude ->"));
     // The symlink itself moved: the guard has nothing left to trip on.
     assert!(h.home.join(".claude").symlink_metadata().is_err());
-    assert!(h.state.join("dot-claude").symlink_metadata().unwrap().is_symlink());
+    assert!(
+        h.state
+            .join("dot-claude")
+            .symlink_metadata()
+            .unwrap()
+            .is_symlink()
+    );
 }
 
 #[test]
@@ -351,7 +395,10 @@ fn claude_unsafe_sets_config_dir_and_seeds_top_level_config() {
     let out = h.mittens(&["harness:claude", "--unsafe", "hi"]);
     let text = stdout(&out);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
-    assert!(text.contains(&format!("CLAUDE_CONFIG_DIR={}/dot-claude", h.state.display())));
+    assert!(text.contains(&format!(
+        "CLAUDE_CONFIG_DIR={}/dot-claude",
+        h.state.display()
+    )));
     assert!(text.contains("ARGS: hi"));
     // Seeded once from the wrapped copy.
     assert_eq!(
@@ -496,7 +543,10 @@ kill -TERM $$
     let out = h.mittens(&["harness:claude", "hello"]);
     assert_eq!(out.status.code(), Some(128 + 15));
     // sync-out still ran after the signal death.
-    assert_eq!(fs::read_to_string(h.state.join("claude.json")).unwrap(), "{\"partial\":true}\n");
+    assert_eq!(
+        fs::read_to_string(h.state.join("claude.json")).unwrap(),
+        "{\"partial\":true}\n"
+    );
 }
 
 #[test]
@@ -519,8 +569,14 @@ fn claude_unsafe_cleans_up_stray_home_data_after_run() {
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     // The fake claude stub writes ~/.claude.json* to the real home; mittens
     // must clean them up so the next run passes the startup guard.
-    assert!(!h.home.join(".claude.json").exists(), "~/.claude.json not cleaned up");
-    assert!(!h.home.join(".claude.json.backup").exists(), "~/.claude.json.backup not cleaned up");
+    assert!(
+        !h.home.join(".claude.json").exists(),
+        "~/.claude.json not cleaned up"
+    );
+    assert!(
+        !h.home.join(".claude.json.backup").exists(),
+        "~/.claude.json.backup not cleaned up"
+    );
 }
 
 #[test]
@@ -545,9 +601,18 @@ echo '{}' > "$HOME/.claude.json"
     let out = h.mittens(&["harness:claude", "--unsafe", "hi"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(!h.home.join(".claude").exists(), "~/.claude not cleaned up");
-    assert!(!h.home.join(".claude.json").exists(), "~/.claude.json not cleaned up");
-    assert_eq!(fs::read_to_string(h.home.join(".claude-notes.md")).unwrap(), "keep me");
-    assert!(h.home.join(".claude-backups").is_dir(), "~/.claude-backups was deleted");
+    assert!(
+        !h.home.join(".claude.json").exists(),
+        "~/.claude.json not cleaned up"
+    );
+    assert_eq!(
+        fs::read_to_string(h.home.join(".claude-notes.md")).unwrap(),
+        "keep me"
+    );
+    assert!(
+        h.home.join(".claude-backups").is_dir(),
+        "~/.claude-backups was deleted"
+    );
 }
 
 #[test]
@@ -565,7 +630,10 @@ kill -TERM $$
     let out = h.mittens(&["harness:claude", "--unsafe", "hello"]);
     assert_eq!(out.status.code(), Some(128 + 15));
     // cleanup_after_unsafe still ran after the signal death.
-    assert!(!h.home.join(".claude.json").exists(), "~/.claude.json not cleaned up after signal");
+    assert!(
+        !h.home.join(".claude.json").exists(),
+        "~/.claude.json not cleaned up after signal"
+    );
 }
 
 #[test]
@@ -602,7 +670,11 @@ fn self_update_reinstalls_over_its_own_cargo_root() {
     // Copy in a child process: an in-process fs::copy holds a write fd that
     // other tests' concurrently forked children can inherit, making the
     // spawn below flake with ETXTBSY.
-    let cp = Command::new("cp").arg(env!("CARGO_BIN_EXE_mittens")).arg(&copy).status().unwrap();
+    let cp = Command::new("cp")
+        .arg(env!("CARGO_BIN_EXE_mittens"))
+        .arg(&copy)
+        .status()
+        .unwrap();
     assert!(cp.success());
 
     let out = Command::new(&copy)
@@ -722,7 +794,11 @@ fn classic_snap_commands_get_shims_over_snap_bin() {
     std::os::unix::fs::symlink(&dispatcher, bin.join("spotify")).unwrap();
     let strict = h.snap_root.join("spotify/7");
     fs::create_dir_all(strict.join("meta")).unwrap();
-    fs::write(strict.join("meta/snap.yaml"), "name: spotify\nconfinement: strict\n").unwrap();
+    fs::write(
+        strict.join("meta/snap.yaml"),
+        "name: spotify\nconfinement: strict\n",
+    )
+    .unwrap();
     std::os::unix::fs::symlink("7", h.snap_root.join("spotify/current")).unwrap();
 
     let out = h.mittens(&["harness:claude", "hi"]);
@@ -736,7 +812,10 @@ fn classic_snap_commands_get_shims_over_snap_bin() {
 
     // The alias's shim execs the snap's real command with the environment
     // snap run would have provided.
-    let run = Command::new(h.state.join("snap-bin/tofu")).arg("plan").output().unwrap();
+    let run = Command::new(h.state.join("snap-bin/tofu"))
+        .arg("plan")
+        .output()
+        .unwrap();
     assert!(run.status.success(), "stderr: {}", stderr(&run));
     assert_eq!(
         stdout(&run),
@@ -746,5 +825,8 @@ fn classic_snap_commands_get_shims_over_snap_bin() {
         )
     );
     // The strict snap's entry replicated the dispatcher symlink.
-    assert_eq!(fs::read_link(h.state.join("snap-bin/spotify")).unwrap(), dispatcher);
+    assert_eq!(
+        fs::read_link(h.state.join("snap-bin/spotify")).unwrap(),
+        dispatcher
+    );
 }

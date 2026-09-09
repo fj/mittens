@@ -53,13 +53,21 @@ impl HarnessSpec for Pi {
     // points one level into the state dir; unsandboxed and wrapped runs then
     // read and write the very same files.
     fn unsafe_support(&self) -> UnsafeSupport {
-        UnsafeSupport::Via { var: "PI_CODING_AGENT_DIR", dir: Some(AGENT_DIR) }
+        UnsafeSupport::Via {
+            var: "PI_CODING_AGENT_DIR",
+            dir: Some(AGENT_DIR),
+        }
     }
 
     // pi reads its global config from ~/.pi/agent, and takes the memory file
     // under the shared config's own name.
     fn extra_bwrap_args(&self, ctx: &Ctx) -> Result<Vec<OsString>> {
-        agent_config::mounts(ctx, AGENT_DIR, &["skills", "prompts", "themes", "tools"], "AGENTS.md")
+        agent_config::mounts(
+            ctx,
+            AGENT_DIR,
+            &["skills", "prompts", "themes", "tools"],
+            "AGENTS.md",
+        )
     }
 }
 

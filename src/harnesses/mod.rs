@@ -36,7 +36,10 @@ pub enum UnsafeSupport {
     /// deeper. Declaring the variable therefore forces declaring its target,
     /// so wrapped and unsandboxed runs cannot silently address different
     /// files.
-    Via { var: &'static str, dir: Option<&'static str> },
+    Via {
+        var: &'static str,
+        dir: Option<&'static str>,
+    },
     /// Why the tool has no such variable.
     Refused(&'static str),
 }
@@ -172,7 +175,11 @@ impl Harness {
             .wait()
             .with_context(|| format!("waiting for {}", bin.display()))?;
         cleanup_after_unsafe(ctx);
-        std::process::exit(status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)));
+        std::process::exit(
+            status
+                .code()
+                .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
+        );
     }
 
     pub fn extra_bwrap_args(self, ctx: &Ctx) -> Result<Vec<OsString>> {
@@ -222,7 +229,10 @@ fn cleanup_after_unsafe(ctx: &Ctx) {
         if let Err(err) = result
             && err.kind() != std::io::ErrorKind::NotFound
         {
-            eprintln!("mittens: warning: could not clean up {}: {err}", path.display());
+            eprintln!(
+                "mittens: warning: could not clean up {}: {err}",
+                path.display()
+            );
         }
     }
 }
@@ -251,26 +261,40 @@ impl Ctx {
 
     pub fn resolve_with(harness: Harness, env: &dyn Fn(&str) -> Option<OsString>) -> Self {
         let home = PathBuf::from(env("HOME").expect("HOME is not set"));
-        let state = env("MITTENS_STATE_DIR").map(PathBuf::from).unwrap_or_else(|| {
-            env("XDG_STATE_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".local/state"))
-                .join(harness.state_leaf())
-        });
-        let agents_cfg = env("MITTENS_AGENTS_DIR").map(PathBuf::from).unwrap_or_else(|| {
-            env("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".config"))
-                .join("agents")
-        });
-        let snap_root =
-            env("MITTENS_SNAP_ROOT").map(PathBuf::from).unwrap_or_else(|| "/snap".into());
-        let etc_ssh =
-            env("MITTENS_ETC_SSH").map(PathBuf::from).unwrap_or_else(|| "/etc/ssh".into());
+        let state = env("MITTENS_STATE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                env("XDG_STATE_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".local/state"))
+                    .join(harness.state_leaf())
+            });
+        let agents_cfg = env("MITTENS_AGENTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                env("XDG_CONFIG_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".config"))
+                    .join("agents")
+            });
+        let snap_root = env("MITTENS_SNAP_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "/snap".into());
+        let etc_ssh = env("MITTENS_ETC_SSH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "/etc/ssh".into());
         let bin = env(harness.bin_env())
             .map(PathBuf::from)
             .or_else(|| harness.default_bin(&home, &snap_root, env));
-        Ctx { harness, home, bin, state, agents_cfg, snap_root, etc_ssh }
+        Ctx {
+            harness,
+            home,
+            bin,
+            state,
+            agents_cfg,
+            snap_root,
+            etc_ssh,
+        }
     }
 
     /// `<state>/dot-<name>` — mounted over `~/.<name>` inside the namespace.
@@ -301,8 +325,10 @@ impl Ctx {
 /// the harness modules'.
 #[cfg(test)]
 fn env_from(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
-    let pairs: Vec<(String, String)> =
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let pairs: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     move |k: &str| {
         pairs
             .iter()
@@ -320,8 +346,14 @@ mod tests {
         let env = env_from(&[("HOME", "/h")]);
         let c = Ctx::resolve_with(CLAUDE, &env);
         assert_eq!(c.state, PathBuf::from("/h/.local/state/claude-home"));
-        assert_eq!(c.dot_state(), PathBuf::from("/h/.local/state/claude-home/dot-claude"));
-        assert_eq!(c.sync_state(), Some(PathBuf::from("/h/.local/state/claude-home/claude.json")));
+        assert_eq!(
+            c.dot_state(),
+            PathBuf::from("/h/.local/state/claude-home/dot-claude")
+        );
+        assert_eq!(
+            c.sync_state(),
+            Some(PathBuf::from("/h/.local/state/claude-home/claude.json"))
+        );
         assert_eq!(c.bin, Some(PathBuf::from("/h/.local/bin/claude")));
         assert_eq!(c.agents_cfg, PathBuf::from("/h/.config/agents"));
         // The host paths every test overrides, so a typo here would disable
@@ -331,13 +363,19 @@ mod tests {
 
         let o = Ctx::resolve_with(OPENCODE, &env);
         assert_eq!(o.state, PathBuf::from("/h/.local/state/opencode-home"));
-        assert_eq!(o.dot_state(), PathBuf::from("/h/.local/state/opencode-home/dot-opencode"));
+        assert_eq!(
+            o.dot_state(),
+            PathBuf::from("/h/.local/state/opencode-home/dot-opencode")
+        );
         assert_eq!(o.sync_state(), None);
         assert_eq!(o.bin, None); // no opencode on the empty PATH
 
         let p = Ctx::resolve_with(PI, &env);
         assert_eq!(p.state, PathBuf::from("/h/.local/state/pi-home"));
-        assert_eq!(p.dot_state(), PathBuf::from("/h/.local/state/pi-home/dot-pi"));
+        assert_eq!(
+            p.dot_state(),
+            PathBuf::from("/h/.local/state/pi-home/dot-pi")
+        );
         assert_eq!(p.sync_state(), None);
         assert_eq!(p.bin, None); // no pi on the empty PATH
     }
@@ -381,7 +419,11 @@ mod tests {
         names.sort_unstable();
         let mut unique = names.to_vec();
         unique.dedup();
-        assert_eq!(unique.len(), names.len(), "two harnesses share a name: {names:?}");
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "two harnesses share a name: {names:?}"
+        );
     }
 
     /// The least a harness can declare: everything else comes from the trait.
@@ -422,7 +464,9 @@ mod tests {
         assert_eq!(bare.extra_bwrap_args(&ctx).unwrap(), Vec::<OsString>::new());
         // Refusing is the default, so a harness runs unsandboxed only when it
         // says how its data follows.
-        let err = bare.unsafe_exec(&ctx, Path::new("/bin/true"), &[]).unwrap_err();
+        let err = bare
+            .unsafe_exec(&ctx, Path::new("/bin/true"), &[])
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             "--unsafe is not supported for bare: no environment variable \

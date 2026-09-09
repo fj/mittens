@@ -193,7 +193,10 @@ Shared agent config: {agents} (used by the claude and pi wiring)
 "#,
         harness = ctx.harness.name(),
         state = ctx.state.display(),
-        bin = ctx.bin.as_ref().map_or("(not found)".into(), |b| b.display().to_string()),
+        bin = ctx
+            .bin
+            .as_ref()
+            .map_or("(not found)".into(), |b| b.display().to_string()),
         agents = ctx.agents_cfg.display(),
         bin_envs = Harness::ALL.map(Harness::bin_env).join(" / "),
     )

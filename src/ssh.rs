@@ -119,7 +119,9 @@ fn include_patterns(text: &str) -> Vec<String> {
         if line.starts_with('#') {
             continue;
         }
-        let end = line.find(|c: char| c.is_whitespace() || c == '=').unwrap_or(line.len());
+        let end = line
+            .find(|c: char| c.is_whitespace() || c == '=')
+            .unwrap_or(line.len());
         let (keyword, rest) = line.split_at(end);
         if keyword.eq_ignore_ascii_case("include") {
             patterns.extend(split_args(rest.trim_start_matches(['=', ' ', '\t'])));
@@ -204,7 +206,9 @@ fn replicate(replica_root: &Path, target: &Path) -> Result<PathBuf> {
     let replica = replica_root.join(target.strip_prefix("/").unwrap_or(target));
     let (dir, name) = (
         replica.parent().context("replica path has no parent")?,
-        replica.file_name().context("replica path has no file name")?,
+        replica
+            .file_name()
+            .context("replica path has no file name")?,
     );
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let tmp = dir.join(temporary_name(name));
@@ -264,7 +268,11 @@ mod tests {
             fs::create_dir_all(etc_ssh.join("ssh_config.d")).unwrap();
             fs::create_dir_all(&state).unwrap();
             fs::write(etc_ssh.join("ssh_config"), ssh_config).unwrap();
-            Fake { _tmp: tmp, etc_ssh, state }
+            Fake {
+                _tmp: tmp,
+                etc_ssh,
+                state,
+            }
         }
 
         fn drop_in(&self, name: &str, body: &str) -> PathBuf {
@@ -297,7 +305,10 @@ mod tests {
     #[test]
     fn drop_ins_are_replicated_and_mounted_over_the_original() {
         let fake = Fake::new("Include ssh_config.d/*.conf\n\nHost *\n  SendEnv LANG\n");
-        let conf = fake.drop_in("20-proxy.conf", "Host .host\n  ProxyCommand /bin/proxy %p\n");
+        let conf = fake.drop_in(
+            "20-proxy.conf",
+            "Host .host\n  ProxyCommand /bin/proxy %p\n",
+        );
         fake.drop_in("ignored.txt", "Host nope\n");
 
         // Only the glob's matches are wired, and each replica sits at its
@@ -306,12 +317,20 @@ mod tests {
         assert_eq!(binds.len(), 1, "{binds:?}");
         let (replica, original) = &binds[0];
         assert_eq!(original, &conf);
-        assert_eq!(replica, &fake.replica_root().join(conf.strip_prefix("/").unwrap()));
+        assert_eq!(
+            replica,
+            &fake.replica_root().join(conf.strip_prefix("/").unwrap())
+        );
         // Byte-identical: the replica changes the owner ssh sees, nothing else.
         assert_eq!(fs::read(replica).unwrap(), fs::read(conf).unwrap());
         // The system-wide file itself is read without an ownership check, so
         // overmounting it would only churn mounts.
-        assert!(!fake.args().iter().any(|a| a == &OsString::from(fake.etc_ssh.join("ssh_config"))));
+        assert!(
+            !fake
+                .args()
+                .iter()
+                .any(|a| a == &OsString::from(fake.etc_ssh.join("ssh_config")))
+        );
     }
 
     #[test]
@@ -332,7 +351,10 @@ mod tests {
         // still carry the original's root ownership into the namespace.
         assert_eq!(replica_meta.uid(), unsafe { libc::geteuid() });
         assert_ne!(replica_meta.ino(), source_meta.ino());
-        assert_eq!(replica_meta.permissions().mode(), source_meta.permissions().mode());
+        assert_eq!(
+            replica_meta.permissions().mode(),
+            source_meta.permissions().mode()
+        );
     }
 
     #[test]
@@ -340,7 +362,10 @@ mod tests {
         let fake = Fake::new("Include ssh_config.d/*.conf\nHost *\n  SendEnv LANG\n");
         // Empty drop-in directory: the glob matches nothing.
         assert!(fake.args().is_empty());
-        assert!(!fake.replica_root().exists(), "an empty replica directory was left behind");
+        assert!(
+            !fake.replica_root().exists(),
+            "an empty replica directory was left behind"
+        );
 
         // No system config at all (a distribution that ships none).
         fs::remove_file(fake.etc_ssh.join("ssh_config")).unwrap();
@@ -408,7 +433,11 @@ mod tests {
         // A replica another session is in the middle of writing is not a
         // stale replica; deleting it would break the rename about to follow.
         let in_flight = fake.replica_root().join(
-            conf.parent().unwrap().strip_prefix("/").unwrap().join(temporary_name(OsStr::new("x"))),
+            conf.parent()
+                .unwrap()
+                .strip_prefix("/")
+                .unwrap()
+                .join(temporary_name(OsStr::new("x"))),
         );
         fs::write(&in_flight, "half-written").unwrap();
 
@@ -419,7 +448,10 @@ mod tests {
         let binds = fake.binds();
         assert_eq!(binds.len(), 1, "{binds:?}");
         assert!(!stale_replica.exists(), "stale replica survived");
-        assert!(in_flight.exists(), "another session's in-flight replica was pruned");
+        assert!(
+            in_flight.exists(),
+            "another session's in-flight replica was pruned"
+        );
         assert_eq!(fs::read(&binds[0].0).unwrap(), fs::read(&conf).unwrap());
 
         // Emptied out entirely, the replica tree leaves no directories behind.
@@ -462,7 +494,10 @@ mod tests {
     #[test]
     fn relative_patterns_anchor_to_the_system_config_directory() {
         let etc_ssh = Path::new("/etc/ssh");
-        assert_eq!(anchor("ssh_config.d/*.conf", etc_ssh), "/etc/ssh/ssh_config.d/*.conf");
+        assert_eq!(
+            anchor("ssh_config.d/*.conf", etc_ssh),
+            "/etc/ssh/ssh_config.d/*.conf"
+        );
         assert_eq!(anchor("/opt/site.conf", etc_ssh), "/opt/site.conf");
         // ~ is legal only in a user config; ssh rejects it in a system one.
         assert_eq!(anchor("~/mine.conf", etc_ssh), "/etc/ssh/~/mine.conf");
@@ -480,7 +515,10 @@ mod tests {
             glob(&format!("{dir}/*.conf")),
             vec![tmp.path().join("a.conf"), tmp.path().join("b.conf")]
         );
-        assert_eq!(glob(&format!("{dir}/a.conf")), vec![tmp.path().join("a.conf")]);
+        assert_eq!(
+            glob(&format!("{dir}/a.conf")),
+            vec![tmp.path().join("a.conf")]
+        );
         assert!(glob(&format!("{dir}/*.missing")).is_empty());
         assert!(glob("relative\0nul").is_empty());
     }

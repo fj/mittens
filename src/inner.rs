@@ -53,7 +53,10 @@ pub fn run(argv: &[OsString]) -> ! {
 
     if sync_home.is_empty() {
         let err = Command::new(bin).args(tool_args).exec();
-        eprintln!("mittens: failed to exec {}: {err}", Path::new(bin).display());
+        eprintln!(
+            "mittens: failed to exec {}: {err}",
+            Path::new(bin).display()
+        );
         std::process::exit(127);
     }
     let sync_home = sync_home.to_string_lossy().into_owned();
@@ -86,9 +89,11 @@ pub fn run(argv: &[OsString]) -> ! {
     sync_out(&state, &state_copy, &home, &home_copy, &sync_home);
 
     match status {
-        Ok(status) => {
-            std::process::exit(status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
-        }
+        Ok(status) => std::process::exit(
+            status
+                .code()
+                .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
+        ),
         Err(err) => {
             eprintln!("mittens: failed to run {}: {err}", Path::new(bin).display());
             std::process::exit(127);
@@ -101,7 +106,9 @@ pub fn run(argv: &[OsString]) -> ! {
 /// names; only the sync file itself drops the leading dot in the state dir).
 fn sync_out(state: &Path, state_copy: &Path, home: &Path, home_copy: &Path, sync_home: &str) {
     let _ = std::fs::copy(home_copy, state_copy);
-    let Ok(backups) = entries_with_prefix(home, &format!("{sync_home}.")) else { return };
+    let Ok(backups) = entries_with_prefix(home, &format!("{sync_home}.")) else {
+        return;
+    };
     for backup in backups {
         if let Some(name) = backup.file_name() {
             let _ = std::fs::copy(&backup, state.join(name));

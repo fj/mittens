@@ -27,7 +27,11 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
     }
     let bin = match ctx.bin.as_deref() {
         Some(bin) if is_executable(bin) => bin,
-        Some(bin) => bail!("{} binary not found at {}", ctx.harness.name(), bin.display()),
+        Some(bin) => bail!(
+            "{} binary not found at {}",
+            ctx.harness.name(),
+            bin.display()
+        ),
         None => bail!("{} binary not found", ctx.harness.name()),
     };
 
@@ -67,7 +71,11 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
     // file bind-mount) around the tool run.
     let exe = std::env::current_exe().context("resolving own executable")?;
     let mut cmd = Command::new("bwrap");
-    cmd.args(&bwrap).arg("--").arg(exe).args(crate::inner::argv(ctx, bin)).args(args);
+    cmd.args(&bwrap)
+        .arg("--")
+        .arg(exe)
+        .args(crate::inner::argv(ctx, bin))
+        .args(args);
     Err(cmd.exec()).context("exec bwrap")
 }
 
@@ -82,9 +90,14 @@ fn guard(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     let harness = ctx.harness.name();
-    eprintln!("mittens: refusing to start: found {} in the real home", stray.join(" "));
+    eprintln!(
+        "mittens: refusing to start: found {} in the real home",
+        stray.join(" ")
+    );
     let dot_state = ctx.dot_state();
-    let populated = fs::read_dir(&dot_state).map(|mut d| d.next().is_some()).unwrap_or(false);
+    let populated = fs::read_dir(&dot_state)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
     if populated {
         eprintln!(
             "mittens: the state directory ({}) is already populated, so this is",
@@ -126,8 +139,13 @@ fn stray_paths(ctx: &Ctx) -> Result<Vec<String>> {
 /// Not pure: the wiring below materializes what it mounts (snap shims, ssh
 /// config replicas, agent-config mountpoints) under `<state>` on the way.
 pub fn bwrap_args(ctx: &Ctx) -> Result<Vec<OsString>> {
-    let mut args: Vec<OsString> =
-        vec!["--dev-bind".into(), "/".into(), "/".into(), "--tmpfs".into(), ctx.home.clone().into()];
+    let mut args: Vec<OsString> = vec![
+        "--dev-bind".into(),
+        "/".into(),
+        "/".into(),
+        "--tmpfs".into(),
+        ctx.home.clone().into(),
+    ];
 
     let sync = ctx.harness.sync_file();
     for name in sorted_home_entries(&ctx.home)? {
@@ -206,7 +224,9 @@ mod tests {
     }
 
     fn strs(args: &[OsString]) -> Vec<String> {
-        args.iter().map(|a| a.to_string_lossy().into_owned()).collect()
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
@@ -219,7 +239,14 @@ mod tests {
         fs::write(ctx.home.join(".claude.json.backup"), "{}").unwrap();
         // Shared agent config: every name claude is meant to take, plus one
         // it is not.
-        for d in ["agents", "commands", "skills", "hooks", "output-styles", "plugins"] {
+        for d in [
+            "agents",
+            "commands",
+            "skills",
+            "hooks",
+            "output-styles",
+            "plugins",
+        ] {
             fs::create_dir_all(ctx.agents_cfg.join(d)).unwrap();
         }
         fs::write(ctx.agents_cfg.join("AGENTS.md"), "# memory\n").unwrap();
@@ -234,8 +261,14 @@ mod tests {
         assert!(!args.contains(&format!("{home}/.claude.json.backup")));
         // ~/.claude appears only as the bind target of dot-claude and the
         // agent-config mountpoints, never as a --dev-bind source.
-        let dot_bind = args.iter().position(|a| a == &ctx.dot_state().display().to_string());
-        assert!(dot_bind.is_some_and(|i| args[i - 1] == "--bind" && args[i + 1] == format!("{home}/.claude")));
+        let dot_bind = args
+            .iter()
+            .position(|a| a == &ctx.dot_state().display().to_string());
+        assert!(
+            dot_bind.is_some_and(
+                |i| args[i - 1] == "--bind" && args[i + 1] == format!("{home}/.claude")
+            )
+        );
         for d in ["agents", "commands", "skills", "hooks", "output-styles"] {
             assert!(
                 args.windows(3).any(|w| w[0] == "--bind"
@@ -264,7 +297,11 @@ mod tests {
         assert!(args.windows(3).any(|w| w[0] == "--bind"
             && w[1] == ctx.dot_state().display().to_string()
             && w[2] == format!("{home}/.opencode")));
-        assert!(!args.iter().any(|a| a.contains("CLAUDE.md") || a.contains("/agents")));
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains("CLAUDE.md") || a.contains("/agents"))
+        );
         // Nothing sets environment for a plain opencode binary.
         assert!(!args.contains(&"--setenv".to_string()));
     }
@@ -315,9 +352,11 @@ mod tests {
         // the setenv the bypassed snap wrapper would have set is preserved.
         ctx.bin = Some(PathBuf::from("/snap/opencode/current/bin/opencode"));
         let args = strs(&bwrap_args(&ctx).unwrap());
-        assert!(args.windows(3).any(|w| w[0] == "--setenv"
-            && w[1] == "OPENCODE_DISABLE_AUTOUPDATE"
-            && w[2] == "1"));
+        assert!(
+            args.windows(3).any(|w| w[0] == "--setenv"
+                && w[1] == "OPENCODE_DISABLE_AUTOUPDATE"
+                && w[2] == "1")
+        );
     }
 
     #[test]
@@ -332,11 +371,18 @@ mod tests {
         // nobody:nogroup owner inside the namespace.
         let drop_in = ctx.etc_ssh.join("ssh_config.d/20-proxy.conf");
         fs::create_dir_all(drop_in.parent().unwrap()).unwrap();
-        fs::write(ctx.etc_ssh.join("ssh_config"), "Include ssh_config.d/*.conf\n").unwrap();
+        fs::write(
+            ctx.etc_ssh.join("ssh_config"),
+            "Include ssh_config.d/*.conf\n",
+        )
+        .unwrap();
         fs::write(&drop_in, "Host .host\n").unwrap();
 
         let args = strs(&bwrap_args(&ctx).unwrap());
-        let replica = ctx.state.join("ssh-config").join(drop_in.strip_prefix("/").unwrap());
+        let replica = ctx
+            .state
+            .join("ssh-config")
+            .join(drop_in.strip_prefix("/").unwrap());
         assert!(
             args.windows(3).any(|w| w[0] == "--ro-bind"
                 && w[1] == replica.display().to_string()
@@ -350,9 +396,15 @@ mod tests {
         let (_tmp, ctx) = scratch_ctx(CLAUDE);
         assert!(stray_paths(&ctx).unwrap().is_empty());
         fs::write(ctx.home.join(".claude.json.corrupt.bak"), "{}").unwrap();
-        assert_eq!(stray_paths(&ctx).unwrap(), vec!["~/.claude.json.corrupt.bak"]);
+        assert_eq!(
+            stray_paths(&ctx).unwrap(),
+            vec!["~/.claude.json.corrupt.bak"]
+        );
         fs::create_dir_all(ctx.home.join(".claude")).unwrap();
-        assert_eq!(stray_paths(&ctx).unwrap(), vec!["~/.claude", "~/.claude.json.corrupt.bak"]);
+        assert_eq!(
+            stray_paths(&ctx).unwrap(),
+            vec!["~/.claude", "~/.claude.json.corrupt.bak"]
+        );
 
         let (_tmp, octx) = scratch_ctx(OPENCODE);
         fs::write(octx.home.join(".opencode-lookalike"), "").unwrap();
