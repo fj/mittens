@@ -17,7 +17,7 @@ mod opencode;
 mod pi;
 
 use std::convert::Infallible;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -203,24 +203,21 @@ impl fmt::Debug for Harness {
     }
 }
 
-/// After a --unsafe run: silently remove any stray real-home paths so the
-/// startup guard passes cleanly on the next invocation. Errors are non-fatal
-/// warnings — the tool has already exited and we must not obscure its exit code.
+/// After a --unsafe run: remove any stray real-home paths outright. The run
+/// pointed the tool's relocation variable at the state dir, so whatever it
+/// wrote to the real home anyway is a duplicate of what is already there, and
+/// leaving it would give the next launch's relocation a stale copy to prefer.
+/// Errors are non-fatal warnings — the tool has already exited and we must not
+/// obscure its exit code.
 fn cleanup_after_unsafe(ctx: &Ctx) {
-    let mut paths = Vec::new();
-    if ctx.home_dot().symlink_metadata().is_ok() {
-        paths.push(ctx.home_dot());
-    }
-    if let Some(sync) = ctx.harness.sync_file() {
-        match entries_with_prefix(&ctx.home, sync) {
-            Ok(more) => paths.extend(more),
-            Err(err) => {
-                eprintln!("mittens: warning: could not enumerate cleanup targets: {err:#}");
-                return;
-            }
+    let stray = match ctx.stray() {
+        Ok(stray) => stray,
+        Err(err) => {
+            eprintln!("mittens: warning: could not enumerate cleanup targets: {err:#}");
+            return;
         }
-    }
-    for path in paths {
+    };
+    for (path, _) in stray {
         let result = if path.is_dir() && !path.is_symlink() {
             fs::remove_dir_all(&path)
         } else {
@@ -312,8 +309,39 @@ impl Ctx {
         self.home.join(self.harness.dot())
     }
 
-    /// Human-readable list of the real-home paths the startup guard checks.
-    pub fn guard_names(&self) -> String {
+    /// Every real-home path of the harness that exists right now, each paired
+    /// with where it belongs in the state directory: the dot directory, plus
+    /// the sync file and any backups beside it. Only the sync file itself
+    /// drops its leading dot in the state dir; backups keep their own names.
+    ///
+    /// The one enumeration of "the harness's data in the real home", shared by
+    /// the relocation, the wipe, and the post-unsafe cleanup so they cannot
+    /// drift apart.
+    pub fn stray(&self) -> Result<Vec<(PathBuf, PathBuf)>> {
+        let mut stray = Vec::new();
+        // symlink_metadata, not is_dir: anything at ~/.<name> counts, a
+        // dangling symlink included, so callers see it and deal with it.
+        if self.home_dot().symlink_metadata().is_ok() {
+            stray.push((self.home_dot(), self.dot_state()));
+        }
+        if let (Some(sync), Some(sync_state)) = (self.harness.sync_file(), self.sync_state()) {
+            let found = entries_with_prefix(&self.home, sync)
+                .with_context(|| format!("reading {}", self.home.display()))?;
+            for from in found {
+                let name = from.file_name().expect("a directory entry has a file name");
+                let to = if name == OsStr::new(sync) {
+                    sync_state.clone()
+                } else {
+                    self.state.join(name)
+                };
+                stray.push((from, to));
+            }
+        }
+        Ok(stray)
+    }
+
+    /// Human-readable list of the real-home paths `stray` looks for.
+    pub fn stray_names(&self) -> String {
         match self.harness.sync_file() {
             Some(sync) => format!("~/{} or ~/{}*", self.harness.dot(), sync),
             None => format!("~/{}", self.harness.dot()),
@@ -399,6 +427,50 @@ mod tests {
         let env = env_from(&[("HOME", "/h"), ("XDG_STATE_HOME", "/xdg-state")]);
         let c = Ctx::resolve_with(CLAUDE, &env);
         assert_eq!(c.state, PathBuf::from("/xdg-state/claude-home"));
+    }
+
+    #[test]
+    fn stray_pairs_each_real_home_path_with_its_state_dir_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let state = tmp.path().join("state");
+        let pairs = [
+            ("HOME", home.to_str().unwrap()),
+            ("MITTENS_STATE_DIR", state.to_str().unwrap()),
+        ];
+        let env = env_from(&pairs);
+
+        let ctx = Ctx::resolve_with(CLAUDE, &env);
+        assert!(ctx.stray().unwrap().is_empty());
+
+        fs::write(home.join(".claude.json.corrupt.bak"), "{}").unwrap();
+        fs::write(home.join(".claude.json"), "{}").unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        // Dot dir first, then the sync file and its backups in name order;
+        // only the sync file itself drops its leading dot in the state dir.
+        assert_eq!(
+            ctx.stray().unwrap(),
+            vec![
+                (home.join(".claude"), ctx.dot_state()),
+                (home.join(".claude.json"), ctx.sync_state().unwrap()),
+                (
+                    home.join(".claude.json.corrupt.bak"),
+                    ctx.state.join(".claude.json.corrupt.bak")
+                ),
+            ]
+        );
+
+        // A harness without a sync file matches its dot dir exactly, so
+        // lookalikes in the real home are none of its business.
+        let octx = Ctx::resolve_with(OPENCODE, &env);
+        fs::write(home.join(".opencode-lookalike"), "").unwrap();
+        assert!(octx.stray().unwrap().is_empty());
+        fs::create_dir_all(home.join(".opencode")).unwrap();
+        assert_eq!(
+            octx.stray().unwrap(),
+            vec![(home.join(".opencode"), octx.dot_state())]
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod engine;
 mod harnesses;
 mod inner;
 mod migrate;
+mod relocate;
 mod snap;
 mod ssh;
 mod util;
@@ -136,13 +137,17 @@ Usage:
   mittens harness:<name> [arguments...]
                                   run the harness inside the namespace;
                                   <name> is one of: {known}, and must
-                                  always be given explicitly
+                                  always be given explicitly. Any of the
+                                  harness's data found in the real home is
+                                  moved into the state directory first, step
+                                  by step on stderr
   mittens harness:<name> --migrate
-                                  move the harness's existing real-home data
-                                  (claude: ~/.claude and ~/.claude.json;
-                                  opencode: ~/.opencode; pi: ~/.pi) into its
-                                  state directory (run this once, with no
-                                  sessions of the harness running)
+                                  do only that move, without launching: the
+                                  harness's real-home data (claude: ~/.claude
+                                  and ~/.claude.json; opencode: ~/.opencode;
+                                  pi: ~/.pi) goes into its state directory.
+                                  Unlike a launch, this refuses while any
+                                  session of the harness is running
   mittens harness:<name> --unsafe [arguments...]
                                   skip the sandbox: exec the tool directly
                                   with its relocation variable pointing at

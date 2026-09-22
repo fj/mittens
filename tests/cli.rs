@@ -313,25 +313,198 @@ fn pi_migrate_moves_dot_dir() {
 }
 
 #[test]
-fn guard_refuses_stray_home_data() {
+fn pi_launch_relocates_a_stray_dot_pi_into_the_state_dir() {
     let h = Harness::new();
-    fs::create_dir_all(h.home.join(".claude")).unwrap();
+    // Everything pi keeps sits one level down, in ~/.pi/agent.
+    fs::create_dir_all(h.home.join(".pi/agent/sessions")).unwrap();
+    fs::write(h.home.join(".pi/agent/auth.json"), "creds").unwrap();
+    // An earlier wrapped run left the agent directory behind, so both levels
+    // merge instead of moving whole.
+    fs::create_dir_all(h.state.join("dot-pi/agent")).unwrap();
+    fs::write(h.state.join("dot-pi/agent/settings.json"), "wrapped").unwrap();
+
+    let out = h.mittens(&["harness:pi", "chat"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "stderr: {err}");
+
+    let agent = h.state.join("dot-pi/agent").display().to_string();
+    for line in [
+        "found ~/.pi in the real home",
+        &format!("moved ~/.pi/agent/auth.json -> {agent}/auth.json"),
+        &format!("moved ~/.pi/agent/sessions/ -> {agent}/sessions/"),
+        "removed empty ~/.pi/agent/",
+        "removed empty ~/.pi/",
+        "mittens: starting pi…",
+    ] {
+        assert!(err.contains(line), "missing {line:?} in stderr: {err}");
+    }
+    assert_eq!(
+        fs::read_to_string(h.state.join("dot-pi/agent/settings.json")).unwrap(),
+        "wrapped"
+    );
+    assert!(stdout(&out).contains("ARGS: chat"));
+    assert_no_stray(&h.home, ".pi");
+}
+
+#[test]
+fn launch_relocates_stray_home_data_verbosely_then_starts() {
+    let h = Harness::new();
+    // Data stranded in the real home by an unwrapped run...
+    fs::create_dir_all(h.home.join(".claude/projects")).unwrap();
+    fs::write(h.home.join(".claude/settings.json"), "real").unwrap();
+    fs::write(h.home.join(".claude.json"), "{\"real\":1}").unwrap();
     fs::write(h.home.join(".claude.json.backup"), "{}").unwrap();
+    // ...on top of a state directory wrapped runs already populated.
+    fs::create_dir_all(h.state.join("dot-claude")).unwrap();
+    fs::write(h.state.join("dot-claude/settings.json"), "wrapped").unwrap();
+    fs::write(h.state.join("dot-claude/plugins.json"), "wrapped").unwrap();
 
     let out = h.mittens(&["harness:claude", "hello"]);
     let err = stderr(&out);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(
-        err.contains("refusing to start: found ~/.claude ~/.claude.json.backup in the real home")
-    );
-    assert!(err.contains("run: mittens harness:claude --migrate"));
+    assert!(out.status.success(), "stderr: {err}");
 
-    // Populated state directory changes the advice.
-    fs::create_dir_all(h.state.join("dot-claude")).unwrap();
-    fs::write(h.state.join("dot-claude/settings.json"), "{}").unwrap();
-    let out = h.mittens(&["harness:claude", "hello"]);
-    assert!(stderr(&out).contains("state directory"));
-    assert!(stderr(&out).contains("leftover from an unwrapped claude run"));
+    // Every stray path is named up front, then every move it took is reported:
+    // this moves the user's data unasked, so it has to say what it did.
+    let dot = h.state.join("dot-claude").display().to_string();
+    for line in [
+        "found ~/.claude ~/.claude.json ~/.claude.json.backup in the real home",
+        &format!("moved ~/.claude/projects/ -> {dot}/projects/"),
+        &format!("moved ~/.claude/settings.json -> {dot}/settings.json"),
+        "removed empty ~/.claude/",
+        &format!("moved ~/.claude.json -> {}/claude.json", h.state.display()),
+        &format!(
+            "moved ~/.claude.json.backup -> {}/.claude.json.backup",
+            h.state.display()
+        ),
+        "mittens: starting claude…",
+    ] {
+        assert!(err.contains(line), "missing {line:?} in stderr: {err}");
+    }
+
+    // The real-home copy won the collision; state-dir data outside the overlap
+    // survived rather than being replaced wholesale.
+    assert_eq!(
+        fs::read_to_string(h.state.join("dot-claude/settings.json")).unwrap(),
+        "real"
+    );
+    assert_eq!(
+        fs::read_to_string(h.state.join("dot-claude/plugins.json")).unwrap(),
+        "wrapped"
+    );
+    assert!(h.state.join("dot-claude/projects").is_dir());
+
+    // The tool then launched and read the relocated config, not a fresh one.
+    let text = stdout(&out);
+    assert!(text.contains("ARGS: hello"));
+    assert!(text.contains("{\"real\":1}"), "stdout: {text}");
+    assert_no_stray(&h.home, ".claude");
+}
+
+#[test]
+fn unsafe_launch_relocates_before_exec_rather_than_letting_cleanup_delete() {
+    let h = Harness::new();
+    // An unwrapped run's data, sitting where the post-run cleanup deletes from:
+    // it has to be moved to the state dir *before* the tool starts, or it is
+    // destroyed rather than adopted.
+    fs::create_dir_all(h.home.join(".claude")).unwrap();
+    fs::write(h.home.join(".claude/credentials.json"), "the only copy").unwrap();
+    fs::write(h.home.join(".claude.json"), "{\"real\":1}").unwrap();
+
+    let out = h.mittens(&["harness:claude", "--unsafe", "hi"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "stderr: {err}");
+    assert!(
+        err.contains("found ~/.claude ~/.claude.json in the real home"),
+        "stderr: {err}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(h.state.join("dot-claude/credentials.json")).unwrap(),
+        "the only copy"
+    );
+    assert_eq!(
+        fs::read_to_string(h.state.join("claude.json")).unwrap(),
+        "{\"real\":1}"
+    );
+    // The relocated config is what seeded the unsafe run's own copy.
+    assert_eq!(
+        fs::read_to_string(h.state.join("dot-claude/.claude.json")).unwrap(),
+        "{\"real\":1}"
+    );
+    assert!(stdout(&out).contains("ARGS: hi"));
+    // What the stub then wrote to the real home is cleaned up as before.
+    assert_no_stray(&h.home, ".claude");
+    assert!(!h.home.join(".claude.json").exists());
+}
+
+#[test]
+fn a_failed_relocation_aborts_the_launch() {
+    let h = Harness::new();
+    fs::create_dir_all(h.home.join(".claude")).unwrap();
+    fs::write(h.home.join(".claude/settings.json"), "keep me").unwrap();
+    // A state directory nested inside the dot directory it has to receive: the
+    // move is a rename of a directory into its own subtree, which the kernel
+    // refuses. Every other step of the launch would succeed, so only the
+    // relocation's failure can stop it here.
+    let state = h.home.join(".claude/state");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mittens"));
+    cmd.args(["harness:claude", "hello"])
+        .env_clear()
+        .env("HOME", &h.home)
+        .env("PATH", format!("{}:/usr/bin:/bin", h.fake_bin.display()))
+        .env("MITTENS_STATE_DIR", &state)
+        .env("MITTENS_CLAUDE_BIN", h.fake_bin.join("claude"))
+        .env("MITTENS_AGENTS_DIR", h.home.join(".config/agents"))
+        .env("MITTENS_SNAP_ROOT", &h.snap_root)
+        .env("MITTENS_ETC_SSH", &h.etc_ssh);
+    let out = run(&mut cmd);
+
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "stderr: {err}");
+    assert!(err.contains("moving"), "stderr: {err}");
+    // The tool must not start over data still sitting in the real home, where
+    // the namespace would shadow it.
+    assert!(!stdout(&out).contains("ARGS:"), "stdout: {}", stdout(&out));
+    assert_eq!(
+        fs::read_to_string(h.home.join(".claude/settings.json")).unwrap(),
+        "keep me"
+    );
+}
+
+#[test]
+fn launch_relocates_even_while_the_tool_is_running() {
+    let h = Harness::new();
+    // Unlike --migrate, a launch does not refuse: the harness's name on the
+    // process list cannot tell a wrapped session (which never reads the real
+    // home) from an unwrapped one.
+    h.script("pgrep", "#!/usr/bin/env bash\necho 4242\n");
+    fs::create_dir_all(h.home.join(".pi/agent")).unwrap();
+    fs::write(h.home.join(".pi/agent/auth.json"), "creds").unwrap();
+
+    let out = h.mittens(&["harness:pi", "chat"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "stderr: {err}");
+    assert!(
+        err.contains("found ~/.pi in the real home"),
+        "stderr: {err}"
+    );
+    assert_eq!(
+        fs::read_to_string(h.state.join("dot-pi/agent/auth.json")).unwrap(),
+        "creds"
+    );
+    assert!(stdout(&out).contains("ARGS: chat"));
+}
+
+#[test]
+fn launch_with_a_clean_home_says_nothing_about_relocation() {
+    let h = Harness::new();
+    let out = h.mittens(&["harness:claude", "hi"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "stderr: {err}");
+    assert!(!err.contains("real home"), "stderr: {err}");
+    assert!(!err.contains("moved"), "stderr: {err}");
+    assert!(stdout(&out).contains("ARGS: hi"));
 }
 
 #[test]
@@ -344,7 +517,7 @@ fn migrate_moves_dot_dir_sync_file_and_backups() {
     let out = h.mittens(&["harness:claude", "--migrate"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.contains("moved ~/.claude ->"));
+    assert!(text.contains("moved ~/.claude/ ->"));
     assert!(text.contains("moved ~/.claude.json ->"));
     assert!(text.contains("migration complete"));
     assert!(h.state.join("dot-claude/projects").is_dir());
@@ -359,11 +532,26 @@ fn migrate_moves_dot_dir_sync_file_and_backups() {
     assert!(!h.home.join(".claude").exists());
     assert!(!h.home.join(".claude.json").exists());
 
-    // A second migrate with a repopulated home refuses to clobber state.
+    // A second migrate merges into the now-populated state dir instead of
+    // refusing; the real-home copy is the later write and takes the collision.
     fs::create_dir_all(h.home.join(".claude")).unwrap();
+    fs::write(h.home.join(".claude/settings.json"), "newer").unwrap();
     let out = h.mittens(&["harness:claude", "--migrate"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("refusing to migrate"));
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(h.state.join("dot-claude/settings.json")).unwrap(),
+        "newer"
+    );
+    assert!(h.state.join("dot-claude/projects").is_dir());
+    assert!(!h.home.join(".claude").exists());
+}
+
+#[test]
+fn migrate_with_a_clean_home_reports_nothing_to_do() {
+    let h = Harness::new();
+    let out = h.mittens(&["harness:pi", "--migrate"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("nothing to migrate: no pi data in the real home (~/.pi)"));
 }
 
 #[test]

@@ -12,6 +12,23 @@ Inside the namespace, `$HOME` is replaced with a throwaway tmpfs, every real top
 
 Because the redirect happens at the kernel VFS layer, it applies to the tool and every subprocess it spawns (shell tools, MCP servers, hooks). It does not depend on the tool honoring any environment variable, now or in future versions.
 
+## Relocation at launch
+
+The redirect only covers what runs inside the namespace. Anything an unwrapped run left in the real home — a `~/.pi` from installing pi and running it once, a `~/.claude.json` written by a plain `claude` — is shadowed and ignored in there, so it would sit unread while wrapped sessions diverge from it.
+
+Every launch therefore moves the harness's real-home data into the state directory first, and reports each step on stderr, because it is moving your data without being asked:
+
+    mittens: found ~/.pi in the real home; moving into ~/.local/state/pi-home
+    mittens:   moved ~/.pi/agent/auth.json -> ~/.local/state/pi-home/dot-pi/agent/auth.json
+    mittens:   moved ~/.pi/agent/sessions/ -> ~/.local/state/pi-home/dot-pi/agent/sessions/
+    mittens:   removed empty ~/.pi/agent/
+    mittens:   removed empty ~/.pi/
+    mittens: starting pi…
+
+A directory that exists on both sides merges entry by entry, so state-dir data outside the overlap is untouched. Anything else replaces its destination: the real-home copy is the later write, being the one made outside the sandbox after the state dir was last used. The one exception is a path that already names its own destination — a hand-rolled `ln -s ~/.local/state/claude-home/dot-claude ~/.claude` from before mittens — which is dropped rather than moved onto the data it points at. `--migrate` is the same operation without the launch.
+
+The move is a rename, so a state directory on another filesystem fails rather than copying; `MITTENS_STATE_DIR` is the only way to arrange that, and the error says to move the data by hand.
+
 ## Harnesses
 
 Everything tool-specific lives in one file per harness under `src/harnesses/`. Each one implements the `HarnessSpec` interface, and `Harness::ALL` is the only list of the harnesses mittens knows about, so a new tool means a new file and one entry there. The first argument selects the harness as `harness:<name>`; there is no default, and mittens refuses to run without an explicit harness:
@@ -103,17 +120,18 @@ opencode refuses `--unsafe`: its `OPENCODE_CONFIG_DIR` only relocates config *lo
 ## Other commands
 
     mittens harness:<name> --migrate
-        Move the harness's existing real-home data into its state directory.
-        Run once, with no sessions of the harness running.
+        Do the relocation below without launching the tool. Unlike a launch,
+        this refuses while any session of the harness is running.
 
     mittens harness:<name> --dangerously-skip-pawmissions [arguments...]
         Inspect the harness's real-home data, count down for 10 seconds, then
-        DELETE it (rm -rf) to clear the startup guard, and launch anyway.
+        DELETE it (rm -rf) instead of relocating it, and launch anyway.
         Destroys data; only for disposable leftovers of unwrapped runs.
 
 ## Caveats
 
-- Plain `claude`/`opencode`/`pi` runs outside mittens will recreate their dotfiles in the real home; mittens refuses to start while any of the harness's real-home paths exist, to prevent silent divergence between the two. Consider aliasing each tool to its `mittens harness:<name>` in your shell (if you shadow the real opencode or pi with a wrapper of the same name, set `MITTENS_OPENCODE_BIN` or `MITTENS_PI_BIN` so mittens does not resolve the wrapper from PATH and recurse).
+- Plain `claude`/`opencode`/`pi` runs outside mittens will recreate their dotfiles in the real home; the next mittens launch relocates them (see above), which keeps the two from diverging but means the unwrapped run's copy wins any file it also wrote in the state dir. Consider aliasing each tool to its `mittens harness:<name>` in your shell (if you shadow the real opencode or pi with a wrapper of the same name, set `MITTENS_OPENCODE_BIN` or `MITTENS_PI_BIN` so mittens does not resolve the wrapper from PATH and recurse).
+- The relocation runs even while another session is live, since the harness's own name on the process list cannot tell a wrapped session from an unwrapped one. A wrapped session never reads the real home, so it is unaffected; an unwrapped one writing at that moment can lose what it had not yet flushed. `--migrate` is the variant that refuses instead.
 - New top-level entries created under `$HOME` inside the namespace land on the tmpfs and vanish on exit. If a tool needs a new persistent `~/.something`, create it in the real home first; it will be bound in on the next launch.
 - Only the current uid is mapped in the sandbox's user namespace, so files owned by anyone else (root included) appear as nobody:nogroup inside it. ssh is repaired specifically (see above); any other tool that insists on an ownership of its own config is subject to the same problem.
 - Tools' own bwrap-based sandboxing cannot start nested inside mittens under Debian's stock AppArmor policy: the stacked bwrap//&unpriv_bwrap profile denies creating a nested mount namespace. Fixable with a custom AppArmor profile for a private copy of bwrap.

@@ -11,7 +11,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::harnesses::Ctx;
-use crate::util::{entries_with_prefix, is_executable, name_starts_with, which};
+use crate::relocate;
+use crate::util::{is_executable, name_starts_with, sorted_entry_names, tilde, which};
 use crate::wipe;
 
 pub enum Mode {
@@ -35,14 +36,14 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
         None => bail!("{} binary not found", ctx.harness.name()),
     };
 
-    // Optionally wipe the real-home data before the guard runs, so that the
-    // guard below finds nothing and lets the tool start.
+    // Optionally wipe the real-home data first, so that the relocation below
+    // finds nothing left to move.
     let skipped = matches!(mode, Mode::SkipPawmissions);
     if skipped {
         wipe::skip_pawmissions(ctx)?;
     }
 
-    guard(ctx)?;
+    adopt(ctx)?;
     fs::create_dir_all(ctx.dot_state())
         .with_context(|| format!("creating {}", ctx.dot_state().display()))?;
 
@@ -79,58 +80,31 @@ pub fn launch(ctx: &Ctx, mode: Mode, args: &[OsString]) -> Result<Infallible> {
     Err(cmd.exec()).context("exec bwrap")
 }
 
-/// Hard guard: refuse to run while any of the harness's data exists in the
-/// real home. It would be shadowed and ignored inside the namespace, so
-/// anything in it (fresh credentials, config edits from an unwrapped run)
-/// would silently diverge from the state directory that wrapped sessions
-/// actually use.
-fn guard(ctx: &Ctx) -> Result<()> {
-    let stray = stray_paths(ctx)?;
+/// Take over whatever the harness left in the real home before launching.
+/// Those paths are shadowed and ignored inside the namespace, so anything in
+/// them (fresh credentials, config edits from an unwrapped run) would silently
+/// diverge from the state directory that wrapped sessions actually use.
+/// Reported step by step: this moves the user's data without being asked, so
+/// it has to say exactly what it did.
+fn adopt(ctx: &Ctx) -> Result<()> {
+    let stray = ctx.stray()?;
     if stray.is_empty() {
         return Ok(());
     }
-    let harness = ctx.harness.name();
+    let names: Vec<String> = stray
+        .iter()
+        .map(|(from, _)| tilde(from, &ctx.home))
+        .collect();
     eprintln!(
-        "mittens: refusing to start: found {} in the real home",
-        stray.join(" ")
+        "mittens: found {} in the real home; moving into {}",
+        names.join(" "),
+        ctx.state.display()
     );
-    let dot_state = ctx.dot_state();
-    let populated = fs::read_dir(&dot_state)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false);
-    if populated {
-        eprintln!(
-            "mittens: the state directory ({}) is already populated, so this is",
-            ctx.state.display()
-        );
-        eprintln!(
-            "mittens: probably leftover from an unwrapped {harness} run; inspect it and either"
-        );
-        eprintln!("mittens: delete it or reconcile it with the state directory by hand");
-    } else {
-        eprintln!(
-            "mittens: close all {harness} sessions and run: mittens harness:{harness} --migrate"
-        );
-    }
-    std::process::exit(1);
-}
-
-/// The harness's real-home paths that exist right now, as ~/-relative strings.
-fn stray_paths(ctx: &Ctx) -> Result<Vec<String>> {
-    let mut stray = Vec::new();
-    if ctx.home_dot().symlink_metadata().is_ok() {
-        stray.push(format!("~/{}", ctx.harness.dot()));
-    }
-    if let Some(sync) = ctx.harness.sync_file() {
-        for path in entries_with_prefix(&ctx.home, sync)
-            .with_context(|| format!("reading {}", ctx.home.display()))?
-        {
-            if let Some(name) = path.file_name() {
-                stray.push(format!("~/{}", name.to_string_lossy()));
-            }
-        }
-    }
-    Ok(stray)
+    relocate::run(&stray, &mut |step| {
+        eprintln!("mittens:   {}", step.describe(&ctx.home))
+    })?;
+    eprintln!("mittens: starting {}…", ctx.harness.name());
+    Ok(())
 }
 
 /// Build the namespace: tmpfs over $HOME, every real top-level entry bound
@@ -184,14 +158,7 @@ pub fn bwrap_args(ctx: &Ctx) -> Result<Vec<OsString>> {
 }
 
 fn sorted_home_entries(home: &Path) -> Result<Vec<OsString>> {
-    let mut names: Vec<OsString> = fs::read_dir(home)
-        .with_context(|| format!("reading {}", home.display()))?
-        .collect::<std::io::Result<Vec<_>>>()?
-        .into_iter()
-        .map(|e| e.file_name())
-        .collect();
-    names.sort();
-    Ok(names)
+    sorted_entry_names(home).with_context(|| format!("reading {}", home.display()))
 }
 
 #[cfg(test)]
@@ -389,28 +356,5 @@ mod tests {
                 && w[2] == drop_in.display().to_string()),
             "{args:?}"
         );
-    }
-
-    #[test]
-    fn stray_detection_matches_guard_globs() {
-        let (_tmp, ctx) = scratch_ctx(CLAUDE);
-        assert!(stray_paths(&ctx).unwrap().is_empty());
-        fs::write(ctx.home.join(".claude.json.corrupt.bak"), "{}").unwrap();
-        assert_eq!(
-            stray_paths(&ctx).unwrap(),
-            vec!["~/.claude.json.corrupt.bak"]
-        );
-        fs::create_dir_all(ctx.home.join(".claude")).unwrap();
-        assert_eq!(
-            stray_paths(&ctx).unwrap(),
-            vec!["~/.claude", "~/.claude.json.corrupt.bak"]
-        );
-
-        let (_tmp, octx) = scratch_ctx(OPENCODE);
-        fs::write(octx.home.join(".opencode-lookalike"), "").unwrap();
-        // Only the exact dot-dir counts for harnesses without a sync file.
-        assert!(stray_paths(&octx).unwrap().is_empty());
-        fs::create_dir_all(octx.home.join(".opencode")).unwrap();
-        assert_eq!(stray_paths(&octx).unwrap(), vec!["~/.opencode"]);
     }
 }

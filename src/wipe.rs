@@ -11,7 +11,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use crate::harnesses::Ctx;
-use crate::util::{entries_with_prefix, human_size, pause, pgrep};
+use crate::util::{human_size, pause, pgrep};
 
 pub fn skip_pawmissions(ctx: &Ctx) -> Result<()> {
     let harness = ctx.harness.name();
@@ -21,7 +21,7 @@ pub fn skip_pawmissions(ctx: &Ctx) -> Result<()> {
     if targets.is_empty() {
         eprintln!(
             "mittens: no real-home {harness} data ({}); nothing to wipe",
-            ctx.guard_names()
+            ctx.stray_names()
         );
         return Ok(());
     }
@@ -71,17 +71,7 @@ pub fn skip_pawmissions(ctx: &Ctx) -> Result<()> {
 }
 
 fn targets(ctx: &Ctx) -> Result<Vec<PathBuf>> {
-    let mut targets = Vec::new();
-    if ctx.home_dot().symlink_metadata().is_ok() {
-        targets.push(ctx.home_dot());
-    }
-    if let Some(sync) = ctx.harness.sync_file() {
-        targets.extend(
-            entries_with_prefix(&ctx.home, sync)
-                .with_context(|| format!("reading {}", ctx.home.display()))?,
-        );
-    }
-    Ok(targets)
+    Ok(ctx.stray()?.into_iter().map(|(from, _)| from).collect())
 }
 
 fn inspect(path: &Path) {

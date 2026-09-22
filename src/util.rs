@@ -81,6 +81,31 @@ pub fn entries_with_prefix(dir: &Path, prefix: &str) -> std::io::Result<Vec<Path
     Ok(matches)
 }
 
+/// Sorted names of `dir` entries.
+pub fn sorted_entry_names(dir: &Path) -> std::io::Result<Vec<OsString>> {
+    let mut names: Vec<OsString> = fs::read_dir(dir)?
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|e| e.file_name())
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// True for a directory, false for a symlink to one: a symlink is a leaf that
+/// moves or goes whole, never a tree to descend into.
+pub fn is_real_dir(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|m| m.is_dir())
+}
+
+/// `path` written with the home directory as `~`, for messages.
+pub fn tilde(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 /// Sleep for `secs`. MITTENS_DELAY_SECS overrides the duration (its only
 /// purpose is letting the test suite run the countdown paths instantly).
 pub fn pause(secs: u64) {
