@@ -97,15 +97,14 @@ impl Harness {
 
     fn script(&self, name: &str, body: &str) -> PathBuf {
         let path = self.fake_bin.join(name);
-        fs::write(&path, body).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        executable(&path, body);
         path
     }
 
     fn mittens(&self, args: &[&str]) -> Output {
         let path = format!("{}:/usr/bin:/bin", self.fake_bin.display());
-        Command::new(env!("CARGO_BIN_EXE_mittens"))
-            .args(args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mittens"));
+        cmd.args(args)
             .env_clear()
             .env("HOME", &self.home)
             .env("PATH", path)
@@ -117,10 +116,32 @@ impl Harness {
             .env("MITTENS_SNAP_ROOT", &self.snap_root)
             .env("MITTENS_ETC_SSH", &self.etc_ssh)
             // Run the countdown/pause paths instantly.
-            .env("MITTENS_DELAY_SECS", "0")
-            .output()
-            .unwrap()
+            .env("MITTENS_DELAY_SECS", "0");
+        run(&mut cmd)
     }
+}
+
+/// Guards the moment a test executable has a writer. `fs::write` holds a write
+/// fd, a concurrently forked child inherits it until its own exec, and exec'ing
+/// a file some process holds open for writing fails with ETXTBSY — so a test
+/// creating its stubs would sporadically break an unrelated test's launch.
+/// Writers take this exclusively and spawners share it, so no fork is ever in
+/// flight while a write fd is open.
+static EXECUTABLES: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Fork under the shared side of that lock. Every spawn in this file goes
+/// through here; one that does not reopens the race for everybody.
+fn run(cmd: &mut Command) -> Output {
+    let _spawning = EXECUTABLES.read().unwrap_or_else(|e| e.into_inner());
+    cmd.output().unwrap()
+}
+
+/// Create a runnable file under the exclusive side of that lock. Every
+/// executable this file writes goes through here, for the same reason.
+fn executable(path: &Path, body: &str) {
+    let _writing = EXECUTABLES.write().unwrap_or_else(|e| e.into_inner());
+    fs::write(path, body).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn stdout(out: &Output) -> String {
@@ -551,11 +572,9 @@ kill -TERM $$
 
 #[test]
 fn inner_rejects_malformed_argv() {
-    let out = Command::new(env!("CARGO_BIN_EXE_mittens"))
+    let out = run(Command::new(env!("CARGO_BIN_EXE_mittens"))
         .args(["__inner", "only-one-arg"])
-        .env_clear()
-        .output()
-        .unwrap();
+        .env_clear());
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("__inner expects"));
 }
@@ -667,23 +686,16 @@ fn self_update_reinstalls_over_its_own_cargo_root() {
     let root = h.home.join("tools");
     fs::create_dir_all(root.join("bin")).unwrap();
     let copy = root.join("bin/mittens");
-    // Copy in a child process: an in-process fs::copy holds a write fd that
-    // other tests' concurrently forked children can inherit, making the
-    // spawn below flake with ETXTBSY.
-    let cp = Command::new("cp")
-        .arg(env!("CARGO_BIN_EXE_mittens"))
-        .arg(&copy)
-        .status()
-        .unwrap();
-    assert!(cp.success());
+    {
+        let _writing = EXECUTABLES.write().unwrap_or_else(|e| e.into_inner());
+        fs::copy(env!("CARGO_BIN_EXE_mittens"), &copy).unwrap();
+    }
 
-    let out = Command::new(&copy)
+    let out = run(Command::new(&copy)
         .arg("self-update")
         .env_clear()
         .env("HOME", &h.home)
-        .env("PATH", format!("{}:/usr/bin:/bin", h.fake_bin.display()))
-        .output()
-        .unwrap();
+        .env("PATH", format!("{}:/usr/bin:/bin", h.fake_bin.display())));
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains(
@@ -725,13 +737,11 @@ fn self_update_is_first_argument_only_and_takes_none() {
 fn self_update_without_cargo_is_reported() {
     let h = Harness::new();
     // PATH must not include the real cargo's directory for this one.
-    let out = Command::new(env!("CARGO_BIN_EXE_mittens"))
+    let out = run(Command::new(env!("CARGO_BIN_EXE_mittens"))
         .arg("self-update")
         .env_clear()
         .env("HOME", &h.home)
-        .env("PATH", &h.fake_bin)
-        .output()
-        .unwrap();
+        .env("PATH", &h.fake_bin));
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("exec cargo install (is cargo installed?)"));
 }
@@ -741,14 +751,12 @@ fn missing_bwrap_is_reported() {
     let h = Harness::new();
     fs::remove_file(h.fake_bin.join("bwrap")).unwrap();
     // PATH must not include the real bwrap's directory for this one.
-    let out = Command::new(env!("CARGO_BIN_EXE_mittens"))
+    let out = run(Command::new(env!("CARGO_BIN_EXE_mittens"))
         .args(["harness:claude", "hello"])
         .env_clear()
         .env("HOME", &h.home)
         .env("PATH", &h.fake_bin)
-        .env("MITTENS_CLAUDE_BIN", h.fake_bin.join("claude"))
-        .output()
-        .unwrap();
+        .env("MITTENS_CLAUDE_BIN", h.fake_bin.join("claude")));
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("bwrap (bubblewrap) is not installed"));
 }
@@ -772,8 +780,7 @@ fn classic_snap_commands_get_shims_over_snap_bin() {
     fs::create_dir_all(&bin).unwrap();
     let dispatcher = h.snap_root.join("usr-bin/snap");
     fs::create_dir_all(dispatcher.parent().unwrap()).unwrap();
-    fs::write(&dispatcher, "").unwrap();
-    fs::set_permissions(&dispatcher, fs::Permissions::from_mode(0o755)).unwrap();
+    executable(&dispatcher, "");
     std::os::unix::fs::symlink(&dispatcher, bin.join("opentofu.tofu")).unwrap();
     std::os::unix::fs::symlink("opentofu.tofu", bin.join("tofu")).unwrap();
     let rev = h.snap_root.join("opentofu/252");
@@ -783,12 +790,10 @@ fn classic_snap_commands_get_shims_over_snap_bin() {
         "name: opentofu\nconfinement: classic\napps:\n  tofu:\n    command: tofu\n    environment:\n      TOFU_FLAVOR: 'firm'\n",
     )
     .unwrap();
-    fs::write(
-        rev.join("tofu"),
+    executable(
+        &rev.join("tofu"),
         "#!/bin/sh\necho \"REAL-TOFU args=$* SNAP=$SNAP name=$SNAP_NAME rev=$SNAP_REVISION flavor=$TOFU_FLAVOR\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(rev.join("tofu"), fs::Permissions::from_mode(0o755)).unwrap();
+    );
     std::os::unix::fs::symlink("252", h.snap_root.join("opentofu/current")).unwrap();
     // A strictly confined snap stays a dispatcher symlink.
     std::os::unix::fs::symlink(&dispatcher, bin.join("spotify")).unwrap();
@@ -812,13 +817,10 @@ fn classic_snap_commands_get_shims_over_snap_bin() {
 
     // The alias's shim execs the snap's real command with the environment
     // snap run would have provided.
-    let run = Command::new(h.state.join("snap-bin/tofu"))
-        .arg("plan")
-        .output()
-        .unwrap();
-    assert!(run.status.success(), "stderr: {}", stderr(&run));
+    let shim = run(Command::new(h.state.join("snap-bin/tofu")).arg("plan"));
+    assert!(shim.status.success(), "stderr: {}", stderr(&shim));
     assert_eq!(
-        stdout(&run),
+        stdout(&shim),
         format!(
             "REAL-TOFU args=plan SNAP={}/opentofu/current name=opentofu rev=252 flavor=firm\n",
             h.snap_root.display()
